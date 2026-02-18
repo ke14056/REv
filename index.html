@@ -4,715 +4,305 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Revidyne Device Manager</title>
-    <link rel="stylesheet" href="styles.css?v=20260113_5">
-
-    <!-- Fallback: ensure Help drawer works even if external CSS is stale/blocked/overridden. -->
-    <style>
-        /* Help drawer fallback (minimal, only if something goes wrong with styles.css) */
-        #helpOverlay {
-            position: fixed;
-            inset: 0;
-            background: rgba(0, 0, 0, 0.55);
-            z-index: 2000;
-            display: none;
-            pointer-events: none;
-        }
-        #helpDrawer {
-            position: fixed;
-            top: 0;
-            right: 0;
-            height: 100vh;
-            width: min(440px, 92vw);
-            z-index: 2001;
-            display: flex;
-            flex-direction: column;
-            background: rgba(12, 16, 25, 0.98);
-            transform: translateX(105%);
-            transition: transform 180ms ease;
-            pointer-events: none;
-        }
-        html.help-open #helpOverlay {
-            display: block;
-            pointer-events: auto;
-        }
-        html.help-open #helpDrawer {
-            transform: translateX(0);
-            pointer-events: auto;
-        }
-        #helpDrawer:target {
-            transform: translateX(0) !important;
-            pointer-events: auto !important;
-            display: flex !important;
-        }
-        #helpDrawer:target ~ #helpOverlay {
-            display: block;
-            pointer-events: auto;
-        }
-    </style>
+    <link rel="stylesheet" href="styles.css?v=20260129">
 </head>
 <body>
     <div class="container">
         <header>
             <h1>⚡ Revidyne Energy Device Manager</h1>
             <div class="header-actions">
-                <label class="safe-mode" title="When ON, set* commands are blocked to prevent risky changes during demos.">
+                <label class="safe-mode" title="When ON, set* commands are blocked">
                     <input id="safeModeToggle" type="checkbox" />
                     <span class="safe-mode-label">Demo/Safe</span>
                 </label>
-                <button id="demoCycleBtn" class="scan-btn" title="Run a demo cycle: turn on house lights, read demand, send to generator." style="background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);">🔄 Demo Cycle</button>
-                <button id="demoTourBtn" class="scan-btn secondary" title="Runs a short guided demo (safe actions only).">🎬 Demo Tour</button>
-                <button id="showTutorialBtn" class="scan-btn secondary" title="Show the Quick Start panel and run the tutorial.">🎓 Tutorial</button>
-                <a id="helpBtn" class="scan-btn secondary" href="#helpDrawer" onclick="window.openHelp && window.openHelp()">❓ Help</a>
+                <button id="demoCycleBtn" class="scan-btn" style="background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);">🔄 Demo Cycle</button>
+                <button id="demoTourBtn" class="scan-btn secondary" title="Step-by-step guided demo">🎬 Demo Tour</button>
+                <button id="showTutorialBtn" class="scan-btn secondary" title="Show tutorial">🎓 Tutorial</button>
                 <button id="scanBtn" class="scan-btn">🔍 Scan Devices</button>
             </div>
         </header>
-        
-        <main class="panels">
-            <div class="panel left-panel">
-                <h2>📋 Available Devices</h2>
-                <p class="panel-desc">Discovered Revidyne devices</p>
-                <div id="availableDevices" class="device-list" 
-                     ondrop="drop(event, 'available')" 
-                     ondragover="allowDrop(event)">
-                </div>
-            </div>
-            
-            <div class="panel right-panel">
-                <h2>✅ Connected Devices</h2>
-                <p class="panel-desc">Drag a device here to control it</p>
-                <div id="connectedDevices" class="device-list"
-                     ondrop="drop(event, 'connected')" 
-                     ondragover="allowDrop(event)">
-                </div>
-            </div>
-        </main>
 
-        <!-- Quick Start / Onboarding (beginner-friendly) -->
-        <section class="onboarding" aria-label="Quick start guide">
-            <div class="onboarding-header">
-                <h2>🎓 Quick Start (Beginner)</h2>
-                <div class="onboarding-actions">
-                    <button id="tutorialBtn" class="onboarding-btn">Start tutorial</button>
-                    <button id="dismissOnboardingBtn" class="onboarding-btn secondary">Hide panel</button>
-                </div>
-            </div>
-            <div class="onboarding-grid">
-                <div class="onboarding-card">
-                    <h3>1) Use the right browser</h3>
-                    <p>Use <b>Chrome</b> or <b>Edge</b>. This site needs Web Serial.</p>
-                    <p class="onboarding-note">Tip: open on <code>http://localhost</code> (or HTTPS) or the serial dialog may be blocked.</p>
-                </div>
-                <div class="onboarding-card">
-                    <h3>2) Scan and pick a port</h3>
-                    <p>Click <b>Scan Devices</b>, then select your device in the popup dialog.</p>
-                    <ul class="onboarding-list">
-                        <li>If nothing shows up: check the USB cable and macOS permission.</li>
-                        <li>If you cancelled the dialog: click Scan again.</li>
-                    </ul>
-                </div>
-                <div class="onboarding-card">
-                    <h3>3) Drag to connect</h3>
-                    <p>Drag a device card from <b>Available</b> to <b>Connected</b> to control it.</p>
-                    <p class="onboarding-note">You’ll see <b>Last / Status / Time</b> update after each command.</p>
-                </div>
-                <div class="onboarding-card">
-                    <h3>4) Try safe actions first</h3>
-                    <p>Start with simple commands (like <code>trackOn</code>, <code>lightsOut</code>). Avoid <code>set*</code> until you understand them.</p>
-                    <p class="onboarding-note">Args = extra input values for commands like <code>setLoad</code>. Delay = wait time between steps.</p>
-                </div>
-            </div>
-        </section>
+        <nav class="navbar">
+            <button class="nav-btn active" data-page="devices">📱 Devices</button>
+            <button class="nav-btn" data-page="metrics">📊 Metrics</button>
+            <button class="nav-btn" data-page="control">🎮 Control</button>
+            <button class="nav-btn" data-page="connections">🔗 Connections</button>
+            <button class="nav-btn" data-page="logs">📋 Logs</button>
+        </nav>
 
-    <!-- Summary / status bar -->
-        <section class="summary" aria-label="Connection summary">
-            <div class="summary-item">
-                <span class="summary-label">Connected</span>
-                <span id="summaryConnected" class="summary-value">0</span>
-            </div>
-            <div class="summary-item">
-                <span class="summary-label">Available</span>
-                <span id="summaryAvailable" class="summary-value">0</span>
-            </div>
-            <div class="summary-item">
-                <span class="summary-label">Providers</span>
-                <span id="summaryProviders" class="summary-value">0</span>
-            </div>
-            <div class="summary-item">
-                <span class="summary-label">Consumers</span>
-                <span id="summaryConsumers" class="summary-value">0</span>
-            </div>
-            <div class="summary-item summary-wide">
-                <span class="summary-label">Last scan</span>
-                <span id="summaryLastScan" class="summary-value">—</span>
-            </div>
-        </section>
-
-        <!-- Live metrics (Voltage / Power) -->
-        <section class="metrics" aria-label="Live metrics">
-            <div class="metrics-header">
-                <h3>Live metrics</h3>
-                <div class="metrics-meta">Updated: <span id="metricsUpdatedAt">—</span></div>
-                <div id="metricsDetailsState" class="metrics-details-state" aria-label="Details state"></div>
-                <label class="metrics-details-toggle" title="Show/hide extra helper text in Live metrics">
-                    <input id="metricsShowDetailsToggle" type="checkbox" />
-                    <span>Show details</span>
-                </label>
-            </div>
-
-            <div class="metrics-quick-actions" aria-label="Live metrics quick actions">
-                <div class="metrics-quick-left">
-                    <div class="metrics-quick-title">Estimates</div>
-                    <div id="demandSourceHint" class="metrics-quick-sub">Demand source: —</div>
+        <div class="nav-page active" id="page-devices">
+            <main class="panels">
+                <div class="panel left-panel">
+                    <h2>📋 Available Devices</h2>
+                    <p class="panel-desc">Discovered Revidyne devices</p>
+                    <div id="availableDevices" class="device-list" ondrop="drop(event, 'available')" ondragover="allowDrop(event)"></div>
                 </div>
-                <button id="jumpToEstimatesBtn" class="metrics-alloc-btn secondary" type="button" title="Scroll to the per-device estimate inputs below.">Jump to device estimates</button>
-            </div>
+                <div class="panel right-panel">
+                    <h2>✅ Connected Devices</h2>
+                    <p class="panel-desc">Drag a device here to control it</p>
+                    <div id="connectedDevices" class="device-list" ondrop="drop(event, 'connected')" ondragover="allowDrop(event)"></div>
+                </div>
+            </main>
+            <section class="onboarding">
+                <div class="onboarding-header">
+                    <h2>🎓 Quick Start</h2>
+                    <button id="dismissOnboardingBtn" class="onboarding-btn secondary">Hide</button>
+                </div>
+                <div class="onboarding-grid">
+                    <div class="onboarding-card"><h3>1) Chrome/Edge</h3><p>Web Serial required.</p></div>
+                    <div class="onboarding-card"><h3>2) Scan</h3><p>Click 🔍 Scan.</p></div>
+                    <div class="onboarding-card"><h3>3) Drag</h3><p>Drag to Connected.</p></div>
+                    <div class="onboarding-card"><h3>4) Commands</h3><p>Click to control.</p></div>
+                </div>
+            </section>
+        </div>
 
-            <!-- Estimated balance (works even when devices don't expose get* telemetry commands) -->
-            <div id="metricsBalance" class="metrics-balance" aria-label="Estimated balance">
-                <div class="metrics-balance-item">
-                    <span class="metrics-balance-label">Estimated supply</span>
-                    <span id="metricsSupply" class="metrics-balance-value">—</span>
-                </div>
-                <div class="metrics-balance-item">
-                    <span class="metrics-balance-label">Estimated demand</span>
-                    <span id="metricsDemand" class="metrics-balance-value">—</span>
-                </div>
-                <div class="metrics-balance-item metrics-balance-wide">
-                    <span class="metrics-balance-label">Balance</span>
-                    <span id="metricsBalanceText" class="metrics-balance-value">—</span>
-                </div>
-                <div id="metricsBalanceHint" class="metrics-balance-hint" aria-label="Balance hint"></div>
+        <div class="nav-page" id="page-metrics">
+            <section class="summary">
+                <div class="summary-item"><span class="summary-label">Connected</span><span id="summaryConnected" class="summary-value">0</span></div>
+                <div class="summary-item"><span class="summary-label">Available</span><span id="summaryAvailable" class="summary-value">0</span></div>
+                <div class="summary-item"><span class="summary-label">Providers</span><span id="summaryProviders" class="summary-value">0</span></div>
+                <div class="summary-item"><span class="summary-label">Consumers</span><span id="summaryConsumers" class="summary-value">0</span></div>
+                <div class="summary-item summary-wide"><span class="summary-label">Last scan</span><span id="summaryLastScan" class="summary-value">—</span></div>
+            </section>
 
-                <div class="metrics-alloc" aria-label="Allocation controls">
-                    <div class="metrics-alloc-left">
-                        <div class="metrics-alloc-title">Apply allocation (Generator)</div>
-                        <div class="metrics-alloc-sub">Sends <code>setLoad</code> to the generator. Works in kW. Respecting Demo/Safe mode.</div>
-                    </div>
-                    <label class="metrics-alloc-field">
-                        <span>Target load (kW)</span>
-                        <input id="allocTargetKW" type="number" min="0" step="0.1" placeholder="e.g., 2.0" />
+            <section class="metrics" aria-label="Live metrics">
+                <div class="metrics-header">
+                    <h3>Live Metrics</h3>
+                    <div class="metrics-meta">Updated: <span id="metricsUpdatedAt">—</span></div>
+                    <button id="metricsPauseBtn" class="metrics-pause-btn" title="Pause/Resume auto-refresh">⏸️ Pause</button>
+                    <button id="metricsRefreshBtn" class="metrics-refresh-btn" title="Refresh now">🔄 Refresh</button>
+                    <button id="metricsResetFilterBtn" class="metrics-reset-btn" title="Reset filter history">🗑️ Reset</button>
+                    <button id="metricsRawBtn" class="metrics-raw-btn" title="Show raw values in console">📊 Raw</button>
+                    <div id="metricsDetailsState" class="metrics-details-state"></div>
+                    <label class="metrics-details-toggle" title="Show/hide extra helper text">
+                        <input id="metricsShowDetailsToggle" type="checkbox" />
+                        <span>Show details</span>
                     </label>
-                    <button id="allocApplyBtn" class="metrics-alloc-btn" type="button">Apply to Generator</button>
+                </div>
+                <div class="metrics-quick-actions">
+                    <div class="metrics-quick-left">
+                        <div class="metrics-quick-title">Estimates</div>
+                        <div id="demandSourceHint" class="metrics-quick-sub">Demand source: —</div>
+                        <label class="metrics-manual-pref" title="When enabled, supply/demand will prefer your manual Capacity/Rated estimates over telemetry (useful for demos).">
+                            <input id="preferManualEstimatesToggle" type="checkbox" />
+                            <span>Prefer manual estimates</span>
+                        </label>
+                    </div>
+                    <button id="jumpToEstimatesBtn" class="metrics-alloc-btn secondary" type="button">Jump to device estimates</button>
+                </div>
 
-                    <div class="metrics-alloc-divider" role="separator" aria-hidden="true"></div>
+                <div id="metricsBalance" class="metrics-balance">
+                    <div class="metrics-balance-item"><span class="metrics-balance-label">Estimated supply</span><span id="metricsSupply" class="metrics-balance-value">—</span></div>
+                    <div class="metrics-balance-item"><span class="metrics-balance-label">Estimated demand</span><span id="metricsDemand" class="metrics-balance-value">—</span></div>
+                    <div class="metrics-balance-item metrics-balance-wide"><span class="metrics-balance-label">Balance</span><span id="metricsBalanceText" class="metrics-balance-value">—</span></div>
+                    <div id="metricsBalanceHint" class="metrics-balance-hint"></div>
 
-                    <div class="metrics-alloc-auto" aria-label="Option A: apply from estimate">
-                        <div class="metrics-alloc-auto-left">
-                            <div class="metrics-alloc-auto-title">Option A (safer): apply from Estimated demand</div>
-                            <div class="metrics-alloc-auto-sub">One click sets generator load to the current <b>Estimated demand</b>. Not automatic.
-                                <span class="metrics-alloc-auto-note">Tip: set a max cap to avoid large jumps.</span>
+                    <div class="metrics-alloc">
+                        <div class="metrics-alloc-left">
+                            <div class="metrics-alloc-title">Apply allocation (Generator)</div>
+                            <div class="metrics-alloc-sub">Sends <code>setLoad</code> to the generator. Respects Demo/Safe mode.</div>
+                        </div>
+                        <label class="metrics-alloc-field">
+                            <span>Target load (kW)</span>
+                            <input id="allocTargetKW" type="number" min="0" step="0.1" placeholder="e.g., 2.0" />
+                        </label>
+                        <button id="allocApplyBtn" class="metrics-alloc-btn" type="button">Apply to Generator</button>
+
+                        <div class="metrics-alloc-divider"></div>
+
+                        <div class="metrics-alloc-auto">
+                            <div class="metrics-alloc-auto-left">
+                                <div class="metrics-alloc-auto-title">Option A: apply from Estimated demand</div>
+                                <div class="metrics-alloc-auto-sub">One click sets generator load to the current Estimated demand.</div>
                             </div>
+                            <label class="metrics-alloc-field">
+                                <span>Max cap (kW)</span>
+                                <input id="allocMaxKW" type="number" min="0" step="0.1" placeholder="optional" />
+                            </label>
+                            <button id="allocApplyFromDemandBtn" class="metrics-alloc-btn secondary" type="button">Set = Estimated demand</button>
                         </div>
-                        <label class="metrics-alloc-field">
-                            <span>Max cap (kW)</span>
-                            <input id="allocMaxKW" type="number" min="0" step="0.1" placeholder="optional" />
-                        </label>
-                        <button id="allocApplyFromDemandBtn" class="metrics-alloc-btn secondary" type="button">Set = Estimated demand</button>
-                    </div>
 
-                    <div class="metrics-alloc-divider" role="separator" aria-hidden="true"></div>
+                        <div class="metrics-alloc-divider"></div>
 
-                    <div class="metrics-alloc-auto" aria-label="Auto-estimate demand">
-                        <div class="metrics-alloc-auto-left">
-                            <div class="metrics-alloc-auto-title">Auto-estimate demand (no HouseLoad telemetry)</div>
-                            <div class="metrics-alloc-auto-sub">If ON, Estimated demand follows provider output. Turn OFF to use manual Consumer estimates.</div>
+                        <div class="metrics-alloc-auto">
+                            <div class="metrics-alloc-auto-left">
+                                <div class="metrics-alloc-auto-title">Auto-estimate demand</div>
+                                <div class="metrics-alloc-auto-sub">If ON, Estimated demand follows provider output.</div>
+                            </div>
+                            <button id="autoEstDemandToggleBtn" class="metrics-alloc-btn secondary" type="button">Enable auto-estimate</button>
+                            <div id="autoEstDemandStatus" class="metrics-balance-hint"></div>
                         </div>
-                        <button id="autoEstDemandToggleBtn" class="metrics-alloc-btn secondary" type="button">Enable auto-estimate</button>
-                        <div id="autoEstDemandStatus" class="metrics-balance-hint" aria-label="Auto-estimate status"></div>
-                    </div>
 
-                    <div class="metrics-alloc-auto" aria-label="Auto-estimate tuning">
-                        <div class="metrics-alloc-auto-left">
-                            <div class="metrics-alloc-auto-title">Auto-estimate tuning</div>
-                            <div class="metrics-alloc-auto-sub">Response speed controls how fast the estimate reacts. Max step limits how much demand can change per update tick.</div>
-                        </div>
-                        <label class="metrics-alloc-field">
-                            <span>Response speed</span>
-                            <input id="autoEstAlpha" type="range" min="0.05" max="0.95" step="0.05" value="0.35" />
-                        </label>
-                        <label class="metrics-alloc-field">
-                            <span>Max step (kW)</span>
-                            <input id="autoEstMaxStep" type="number" min="0.1" step="0.1" value="1.0" />
-                        </label>
-                    </div>
-                </div>
-            </div>
-
-            <div id="metricsEmpty" class="empty-state">Connect a device to see voltage/power readings.</div>
-            <div class="metrics-table-wrap">
-                <table class="metrics-table" aria-label="Device metrics table">
-                    <thead>
-                        <tr>
-                            <th>Device</th>
-                            <th>Type</th>
-                            <th>Voltage</th>
-                            <th>Power (kW)</th>
-                        </tr>
-                    </thead>
-                    <tbody id="metricsTableBody"></tbody>
-                </table>
-            </div>
-        </section>
-
-        <!-- Scenario controller -->
-        <section class="controller" aria-label="Scenario controller">
-            <div class="controller-header">
-                <h3>Controller</h3>
-                <div class="controller-hint">Run multi-device scenarios (SolarTracker + Generator + HouseLoad)</div>
-            </div>
-            <div class="controller-actions">
-                <button class="controller-btn" onclick="manager.runScenario('startup')">▶ Startup</button>
-                <button class="controller-btn" onclick="manager.runScenario('eco')">🌿 Eco</button>
-                <button class="controller-btn" onclick="manager.runScenario('demand')">⚡ Demand</button>
-            </div>
-            <div class="controller-note" id="controllerStatus">Tip: connect the devices you want to control, then click a scenario.</div>
-        </section>
-
-        <!-- Command log -->
-        <section class="cmdlog" aria-label="Command log">
-            <div class="cmdlog-header">
-                <h3>Command log</h3>
-                <div class="cmdlog-actions">
-                    <button class="cmdlog-btn" onclick="manager.exportCommandLog('json')">Export JSON</button>
-                    <button class="cmdlog-btn" onclick="manager.exportCommandLog('csv')">Export CSV</button>
-                    <button class="cmdlog-btn danger" onclick="manager.clearCommandLog()">Clear</button>
-                </div>
-            </div>
-            <div class="cmdlog-table-wrap">
-                <table class="cmdlog-table" aria-label="Command log table">
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Device</th>
-                            <th>Command</th>
-                            <th>Args</th>
-                            <th>Result</th>
-                        </tr>
-                    </thead>
-                    <tbody id="cmdLogBody"></tbody>
-                </table>
-            </div>
-            <div id="cmdLogEmpty" class="empty-state">No commands yet. Click a command button or run a scenario.</div>
-        </section>
-
-        <!-- Troubleshooting / Fix-it (English, for first-time users) -->
-        <section class="fixit" aria-label="Troubleshooting">
-            <details class="fixit-details" id="fixitDetails">
-                <summary class="fixit-summary">
-                    <div class="fixit-summary-left">
-                        <h3>🛠 Troubleshooting / Fix-it</h3>
-                        <div class="fixit-meta">If something doesn’t work, expand to see quick fixes (in order).</div>
-                    </div>
-                    <span class="fixit-summary-cta">Show</span>
-                </summary>
-
-                <div class="fixit-body">
-                    <div class="fixit-grid" role="list">
-                        <div class="fixit-card" role="listitem">
-                            <div class="fixit-badge">STEP 1</div>
-                            <h4>Use the right browser</h4>
-                            <p>This app requires <b>Web Serial</b>. Use <b>Chrome</b> or <b>Edge</b> (Safari won’t work).</p>
-                        </div>
-                        <div class="fixit-card" role="listitem">
-                            <div class="fixit-badge">STEP 2</div>
-                            <h4>Open via localhost / HTTPS</h4>
-                            <p>Open the page on <code>http://localhost</code> (or HTTPS). Otherwise the serial picker may be blocked.</p>
-                        </div>
-                        <div class="fixit-card" role="listitem">
-                            <div class="fixit-badge">STEP 3</div>
-                            <h4>Check cable + permissions</h4>
-                            <p>Try a different USB cable/port. On macOS, allow the browser to access USB if prompted.</p>
-                        </div>
-                        <div class="fixit-card" role="listitem">
-                            <div class="fixit-badge">STEP 4</div>
-                            <h4>Close other serial apps</h4>
-                            <p>Close Arduino IDE / serial monitors that may be using the same port, then click <b>Scan Devices</b> again.</p>
-                        </div>
-                        <div class="fixit-card" role="listitem">
-                            <div class="fixit-badge">STEP 5</div>
-                            <h4>Nothing shows in the picker</h4>
-                            <p>Unplug → wait 2 seconds → replug → click <b>Scan Devices</b> again.</p>
-                        </div>
-                        <div class="fixit-card" role="listitem">
-                            <div class="fixit-badge">STEP 6</div>
-                            <h4>Commands time out</h4>
-                            <p>Use fewer devices, increase delays between steps, or avoid fast cycle loops. Some firmware takes time to respond.</p>
+                        <div class="metrics-alloc-auto">
+                            <div class="metrics-alloc-auto-left">
+                                <div class="metrics-alloc-auto-title">Auto-estimate tuning</div>
+                                <div class="metrics-alloc-auto-sub">Response speed and max step.</div>
+                            </div>
+                            <label class="metrics-alloc-field">
+                                <span>Response speed</span>
+                                <input id="autoEstAlpha" type="range" min="0.05" max="0.95" step="0.05" value="0.35" />
+                            </label>
+                            <label class="metrics-alloc-field">
+                                <span>Max step (kW)</span>
+                                <input id="autoEstMaxStep" type="number" min="0.1" step="0.1" value="1.0" />
+                            </label>
                         </div>
                     </div>
-                    <div class="fixit-footer" id="fixitHint">Tip: Turn <b>Demo/Safe</b> ON for demos to block risky <code>set*</code> commands.</div>
                 </div>
-            </details>
-        </section>
 
-        <!-- Command library (drag commands into Flow Builder) -->
-        <section class="library" aria-label="Command library">
-            <div class="library-header">
-                <h3>Command library</h3>
-                <div class="library-meta">Drag a command into the Flow Builder below</div>
-            </div>
-            <div class="library-controls">
-                <input id="librarySearch" class="library-search" type="text" placeholder="Search commands (e.g. track, light, setLoad)" />
-                <button class="library-btn" onclick="manager.refreshCommandLibrary()">Refresh</button>
-            </div>
-            <div id="libraryBody" class="library-body"></div>
-            <div id="libraryEmpty" class="empty-state">Connect devices to see their commands here.</div>
-        </section>
-
-        <!-- Templates (one-click demo flows) -->
-        <section class="templates" aria-label="Flow templates">
-            <div class="templates-header">
-                <h3>Templates</h3>
-                <div class="templates-meta">One-click flows for demos and beginner learning</div>
-            </div>
-            <div class="templates-actions">
-                <button class="templates-btn" data-template="gen_load_cycle" onclick="applyTemplate('gen_load_cycle')">⚡ Generator + Load (Cycle)</button>
-                <button class="templates-btn" data-template="solar_tracker_routine" onclick="applyTemplate('solar_tracker_routine')">🧭 Solar tracker routine</button>
-                <button class="templates-btn secondary" data-template="safe_demo" onclick="applyTemplate('safe_demo')">🧪 Safe demo (no set*)</button>
-                <button class="templates-btn" data-template="wind_turbine_demo" onclick="applyTemplate('wind_turbine_demo')">🌬️ Wind turbine demo</button>
-                <button class="templates-btn" data-template="fan_speed_demo" onclick="applyTemplate('fan_speed_demo')">🌀 Fan speed demo</button>
-            </div>
-            <div class="templates-note">Tip: If devices are connected, templates will auto-pick matching devices/commands. Otherwise it will fill placeholders you can edit.</div>
-        </section>
-
-        <!-- Connections (Producer → Consumer wiring diagram) -->
-        <section class="connections" aria-label="Connections">
-            <div class="connections-header">
-                <h3>Connections</h3>
-                <div class="connections-meta">Link Providers (left) to Consumers (right). Click a Provider then a Consumer to connect.</div>
-                <div class="connections-actions">
-                    <button id="connApplyMode2Btn" class="flow-btn" type="button" title="Mode 2: Generator fills deficit (Demand − other supply)">Apply (Mode 2)</button>
-                    <label class="conn-auto" title="If enabled, Mode 2 will re-apply periodically while connected">
-                        <input id="connAutoMode2Toggle" type="checkbox" />
-                        Auto
-                    </label>
-                    <button id="connClearBtn" class="flow-btn danger" type="button">Clear connections</button>
-                </div>
-            </div>
-            <div class="connections-hint">Tip: Click a Provider block, then click a Consumer block. Click a line to remove it.</div>
-            <div id="connCanvas" class="conn-canvas" aria-label="Connection canvas">
-                <svg id="connSvg" class="conn-svg" aria-hidden="true"></svg>
-                <div class="conn-col">
-                    <div class="conn-col-title">Providers</div>
-                    <div id="connProviders" class="conn-list" aria-label="Provider blocks"></div>
-                </div>
-                <div class="conn-col">
-                    <div class="conn-col-title">Consumers</div>
-                    <div id="connConsumers" class="conn-list" aria-label="Consumer blocks"></div>
-                </div>
-            </div>
-            <div id="connStatus" class="connections-status">No connections yet.</div>
-        </section>
-
-        <!-- Flow Builder (custom draggable steps) -->
-        <section class="flow" aria-label="Flow Builder">
-            <div class="flow-header">
-                <h3>Flow Builder</h3>
-                <div class="flow-actions">
-                    <button class="flow-btn" onclick="manager.addFlowStep()">+ Add step</button>
-                    <button class="flow-btn" onclick="manager.runFlow()">▶ Run flow</button>
-                    <button id="flowStopBtn" class="flow-btn danger" onclick="manager.stopFlow()" disabled>■ Stop</button>
-                    <button class="flow-btn" onclick="manager.saveFlow()">Save</button>
-                    <button class="flow-btn" onclick="manager.loadFlow()">Load</button>
-                    <button class="flow-btn danger" onclick="manager.clearFlow()">Clear</button>
-                </div>
-            </div>
-            <div class="flow-cycle" aria-label="Flow cycle controls">
-                <div class="flow-cycle-left">
-                    <label class="flow-cycle-label">Mode</label>
-                    <select id="flowMode" class="flow-cycle-select">
-                        <option value="once" selected>Run once</option>
-                        <option value="loop">Cycle</option>
-                    </select>
-                    <label class="flow-cycle-label" for="flowCycles">Cycles</label>
-                    <input id="flowCycles" class="flow-cycle-input" type="number" min="1" step="1" value="3" />
-                    <span class="flow-cycle-help">(only used when Mode = Cycle)</span>
-                </div>
-                <div class="flow-cycle-right">
-                    <label class="flow-cycle-label" for="flowRestMs">Rest between cycles (ms)</label>
-                    <input id="flowRestMs" class="flow-cycle-input" type="number" min="0" step="100" value="500" />
-                </div>
-            </div>
-            <div class="flow-hint">Drag steps up/down to reorder. Pick a connected device + command. Use Args for set* values, and Delay (ms) between steps.</div>
-            <ol id="flowList" class="flow-list"></ol>
-            <div id="flowEmpty" class="empty-state">No steps yet. Click “Add step”, then drag to reorder.</div>
-            <div id="flowStatus" class="flow-status">Ready.</div>
-
-            <!-- Last run summary (KPI / verification for reports) -->
-            <section class="run-summary" aria-label="Last run summary">
-                <div class="run-summary-header">
-                    <h4>Last run summary</h4>
-                    <div class="run-summary-actions">
-                        <button class="run-summary-btn" onclick="exportRunSummary('json')">Export JSON</button>
-                        <button class="run-summary-btn secondary" onclick="copyRunSummary()">Copy</button>
-                        <button class="run-summary-btn danger" onclick="clearRunSummary()">Clear</button>
-                    </div>
-                </div>
-                <div id="runSummaryBody" class="run-summary-body">
-                    <div class="empty-state">No runs yet. Click “Run flow” to generate a summary.</div>
+                <div id="metricsEmpty" class="empty-state">Connect a device to see voltage/power readings.</div>
+                <div class="metrics-table-wrap">
+                    <table class="metrics-table">
+                        <thead><tr><th>Device</th><th>Type</th><th>Voltage</th><th>Power (kW)</th></tr></thead>
+                        <tbody id="metricsTableBody"></tbody>
+                    </table>
                 </div>
             </section>
-
-            <!-- Run history (KPI / trends for reports) -->
-            <section class="run-history" aria-label="Run history">
-                <div class="run-summary-header">
-                    <h4>Run history (last <span id="runHistoryN">10</span>)</h4>
-                    <div class="run-summary-actions">
-                        <button class="run-summary-btn" onclick="exportRunHistory('json')">Export history</button>
-                        <button class="run-summary-btn danger" onclick="clearRunHistory()">Clear history</button>
-                    </div>
-                </div>
-                <div id="runHistoryBody" class="run-summary-body">
-                    <div class="empty-state">No history yet. Run a flow a few times to see KPIs and a trend chart.</div>
-                </div>
-            </section>
-        </section>
-        
-        <footer>
-            <div class="legend">
-                <span class="legend-item"><span class="dot provider"></span> Provider (Generator / Solar / Wind)</span>
-                <span class="legend-item"><span class="dot consumer"></span> Consumer (Load / Fan)</span>
-            </div>
-        </footer>
-    </div>
-    
-    <!-- Command result modal -->
-    <div id="resultModal" class="modal" onclick="closeModal()">
-        <div class="modal-content" onclick="event.stopPropagation()">
-            <span class="close-btn" onclick="closeModal()">&times;</span>
-            <div id="resultContent"></div>
         </div>
+
+        <div class="nav-page" id="page-control">
+            <section class="library">
+                <div class="library-header"><h3>Command Library</h3></div>
+                <div class="library-controls"><input id="librarySearch" class="library-search" type="text" placeholder="Search..." /><button class="library-btn" onclick="manager.refreshCommandLibrary()">Refresh</button></div>
+                <div id="libraryBody" class="library-body"></div>
+                <div id="libraryEmpty" class="empty-state">Connect devices to see commands.</div>
+            </section>
+        </div>
+
+        <div class="nav-page" id="page-connections">
+            <section class="connections">
+                <div class="connections-header"><h3>Connections</h3><div class="connections-meta">Link Providers to Consumers</div>
+                    <div class="connections-actions"><button id="connApplyMode2Btn" class="flow-btn">Apply</button><button id="connClearBtn" class="flow-btn danger">Clear</button></div>
+                </div>
+                <div class="connections-hint">Click Provider then Consumer.</div>
+                <div id="connCanvas" class="conn-canvas">
+                    <svg id="connSvg" class="conn-svg"></svg>
+                    <div class="conn-col"><div class="conn-col-title">Providers</div><div id="connProviders" class="conn-list"></div></div>
+                    <div class="conn-col"><div class="conn-col-title">Consumers</div><div id="connConsumers" class="conn-list"></div></div>
+                </div>
+                <div id="connStatus" class="connections-status">No connections.</div>
+            </section>
+
+            <section class="demand-request">
+                <div class="demand-request-header">
+                    <h3>🏠 Demand Request Mode</h3>
+                    <div class="demand-request-meta">Set consumer needs, auto-request from providers</div>
+                </div>
+                <div class="demand-request-body">
+                    <div class="demand-request-hint">
+                        <p>💡 Add multiple consumers and their power needs below, then click <strong>Apply All Requests</strong>.</p>
+                        <p>The system will automatically update connections and request the generator to fill any deficit.</p>
+                    </div>
+                    
+                    <div class="demand-request-list-header">
+                        <span>Consumer Requests</span>
+                        <button id="demandAddBtn" class="flow-btn secondary">+ Add Request</button>
+                    </div>
+                    <div id="demandRequestList" class="demand-request-list">
+                        <!-- Dynamic rows will be added here -->
+                    </div>
+                    
+                    <div class="demand-request-actions">
+                        <button id="demandApplyAllBtn" class="flow-btn">⚡ Apply All Requests</button>
+                        <button id="demandClearAllBtn" class="flow-btn danger">Clear All</button>
+                        <span id="demandTotalKW" class="demand-total">Total: 0.00 kW</span>
+                    </div>
+                    <div id="demandRequestStatus" class="demand-request-status"></div>
+                </div>
+            </section>
+
+            <section class="surplus-handler">
+                <div class="surplus-header">
+                    <h3>⚡ Surplus Energy Handler</h3>
+                    <div class="surplus-meta">Route excess power to CVT or storage</div>
+                </div>
+                <div class="surplus-body">
+                    <div class="surplus-hint">
+                        <p>💡 When supply exceeds demand, the surplus energy can be sent to a <strong>CVT</strong> to be consumed or stored.</p>
+                    </div>
+                    
+                    <div class="surplus-status-row">
+                        <div class="surplus-item">
+                            <span class="surplus-label">Estimated Supply</span>
+                            <span id="surplusSupply" class="surplus-value">0.00 kW</span>
+                        </div>
+                        <div class="surplus-item">
+                            <span class="surplus-label">Estimated Demand</span>
+                            <span id="surplusDemand" class="surplus-value">0.00 kW</span>
+                        </div>
+                        <div class="surplus-item surplus-highlight">
+                            <span class="surplus-label">Surplus</span>
+                            <span id="surplusValue" class="surplus-value">0.00 kW</span>
+                        </div>
+                    </div>
+
+                    <div class="surplus-target">
+                        <label class="surplus-field">
+                            <span>Send surplus to</span>
+                            <select id="surplusTargetSelect">
+                                <option value="">-- Select CVT/Storage --</option>
+                            </select>
+                        </label>
+                        <button id="surplusApplyBtn" class="flow-btn">🔄 Route Surplus to CVT</button>
+                    </div>
+                    <div id="surplusStatus" class="surplus-status"></div>
+                </div>
+            </section>
+        </div>
+
+        <div class="nav-page" id="page-logs">
+            <section class="controller">
+                <div class="controller-header"><h3>Controller</h3><div class="controller-hint">Run scenarios</div></div>
+                <div class="controller-actions">
+                    <button class="controller-btn" onclick="manager.runScenario('startup')">▶ Startup</button>
+                    <button class="controller-btn" onclick="manager.runScenario('eco')">🌿 Eco</button>
+                    <button class="controller-btn" onclick="manager.runScenario('demand')">⚡ Demand</button>
+                </div>
+                <div class="controller-note" id="controllerStatus">Connect devices first.</div>
+            </section>
+
+            <section class="templates">
+                <div class="templates-header"><h3>Templates</h3></div>
+                <div class="templates-actions">
+                    <button class="templates-btn" onclick="applyTemplate('gen_load_cycle')">⚡ Generator + Load</button>
+                    <button class="templates-btn" onclick="applyTemplate('solar_tracker_routine')">🧭 Solar Tracker</button>
+                    <button class="templates-btn" onclick="applyTemplate('wind_turbine_demo')">🌬️ Wind Turbine</button>
+                </div>
+            </section>
+
+            <section class="cmdlog">
+                <div class="cmdlog-header"><h3>Command Log</h3>
+                    <div class="cmdlog-actions"><button class="cmdlog-btn" onclick="manager.exportCommandLog('json')">JSON</button><button class="cmdlog-btn" onclick="manager.exportCommandLog('csv')">CSV</button><button class="cmdlog-btn danger" onclick="manager.clearCommandLog()">Clear</button></div>
+                </div>
+                <div class="cmdlog-table-wrap"><table class="cmdlog-table"><thead><tr><th>Time</th><th>Device</th><th>Command</th><th>Args</th><th>Result</th></tr></thead><tbody id="cmdLogBody"></tbody></table></div>
+                <div id="cmdLogEmpty" class="empty-state">No commands yet.</div>
+            </section>
+            <section class="flow">
+                <div class="flow-header"><h3>Flow Builder</h3>
+                    <div class="flow-actions"><button class="flow-btn" onclick="manager.addFlowStep()">+ Add</button><button class="flow-btn" onclick="manager.runFlow()">▶ Run</button><button id="flowStopBtn" class="flow-btn danger" onclick="manager.stopFlow()" disabled>■ Stop</button><button class="flow-btn" onclick="manager.clearFlow()">Clear</button></div>
+                </div>
+                <ol id="flowList" class="flow-list"></ol>
+                <div id="flowEmpty" class="empty-state">No steps.</div>
+                <div id="flowStatus" class="flow-status">Ready.</div>
+                <section class="run-summary"><div class="run-summary-header"><h4>Last Run</h4></div><div id="runSummaryBody" class="run-summary-body"><div class="empty-state">No runs.</div></div></section>
+                <section class="run-history"><div class="run-summary-header"><h4>History (<span id="runHistoryN">10</span>)</h4></div><div id="runHistoryBody" class="run-summary-body"><div class="empty-state">No history.</div></div></section>
+            </section>
+        </div>
+
+        <footer><div class="legend"><span class="legend-item"><span class="dot provider"></span> Provider</span><span class="legend-item"><span class="dot consumer"></span> Consumer</span></div></footer>
     </div>
 
-    <!-- Help drawer (right-side, collapsible) -->
-    <aside id="helpDrawer" class="help-drawer" aria-label="Help panel" aria-hidden="true">
-        <div class="help-drawer-header">
-            <div class="help-drawer-title">
-                <div class="help-drawer-eyebrow">Help</div>
-                <h3>Using Revidyne Device Manager</h3>
-            </div>
-            <a id="helpCloseBtn" class="help-close" href="#" role="button" aria-label="Close help">✕</a>
-        </div>
-        <div class="help-drawer-body">
-            <section class="help-section" aria-label="Help search">
-                <h4>Search</h4>
-                <input id="helpSearch" class="help-search" type="text" placeholder="Search help (e.g. scan, timeout, setLoad)" autocomplete="off" />
-                <div id="helpNoResults" class="help-no-results">No matches. Try a different keyword.</div>
-            </section>
-
-            <section class="help-section" aria-label="Quick Start">
-                <h4>Quick Start</h4>
-                <ol class="help-steps">
-                    <li><b>Use Chrome or Edge</b> (Web Serial required).</li>
-                    <li>Open via <code>http://localhost</code> (or HTTPS).</li>
-                    <li>Click <b>Scan Devices</b> and select a port in the popup.</li>
-                    <li>Drag a device from <b>Available</b> → <b>Connected</b>.</li>
-                    <li>Try a template or run a few commands to see logs and KPIs.</li>
-                </ol>
-            </section>
-
-            <section class="help-section" aria-label="Troubleshooting">
-                <h4>Troubleshooting (Fix-it)</h4>
-                <p class="help-note">We keep the full Fix-it checklist in the main page (cards + details). Open it here:</p>
-                <button id="openFixitBtn" class="help-cta" type="button">Open Fix-it panel</button>
-            </section>
-
-            <section class="help-section" aria-label="Demo Safe Mode">
-                <h4>Demo/Safe Mode</h4>
-                <p><b>Demo/Safe</b> blocks risky <code>set*</code> commands to prevent accidental parameter changes during demos.</p>
-                <p class="help-note">If something is blocked, you’ll see <b>BLOCKED</b> in the device status and in the Command log.</p>
-            </section>
-
-            <section class="help-section" aria-label="Command tooltips">
-                <h4>Command Help</h4>
-                <ul class="help-steps">
-                    <li>Hover a command button (or a library chip) to see what it does.</li>
-                    <li>If a command needs input, look for <code>Args</code>.</li>
-                </ul>
-            </section>
-        </div>
-    </aside>
-
-    <a id="helpOverlay" class="help-overlay" aria-hidden="true" href="#" aria-label="Close help"></a>
+    <div id="resultModal" class="modal" onclick="closeModal()"><div class="modal-content" onclick="event.stopPropagation()"><span class="close-btn" onclick="closeModal()">&times;</span><div id="resultContent"></div></div></div>
 
     <script>
-        // Help drawer controls (keep page UI English; chat can be Chinese)
-        (function () {
-            const helpBtn = document.getElementById('helpBtn');
-            const drawer = document.getElementById('helpDrawer');
-            const overlay = document.getElementById('helpOverlay');
-            const closeBtn = document.getElementById('helpCloseBtn');
-            const fixitDetails = document.getElementById('fixitDetails');
-            const openFixitBtn = document.getElementById('openFixitBtn');
-            const helpSearch = document.getElementById('helpSearch');
-            const helpNoResults = document.getElementById('helpNoResults');
-
-            function openHelp() {
-                if (!drawer || !overlay) return;
-                drawer.setAttribute('aria-hidden', 'false');
-                overlay.setAttribute('aria-hidden', 'false');
-                document.documentElement.classList.add('help-open');
-                try { console.debug('[help] drawer opened'); } catch {}
-            }
-
-            function closeHelp() {
-                if (!drawer || !overlay) return;
-                drawer.setAttribute('aria-hidden', 'true');
-                overlay.setAttribute('aria-hidden', 'true');
-                document.documentElement.classList.remove('help-open');
-            }
-
-            function openFixitFromHelp() {
-                // Close help first so it doesn't cover the target section
-                closeHelp();
-
-                if (!fixitDetails) return;
-                try {
-                    fixitDetails.open = true;
-                    fixitDetails.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-                    // Tiny visual pulse so users see where they landed
-                    const el = fixitDetails;
-                    const prev = el.style.boxShadow;
-                    el.style.boxShadow = '0 0 0 3px rgba(120,200,255,.25), 0 12px 40px rgba(0,0,0,.35)';
-                    window.setTimeout(() => { el.style.boxShadow = prev; }, 900);
-                } catch {
-                    // ignore
-                }
-            }
-
-            function normalizeQuery(q) {
-                return String(q || '').trim().toLowerCase();
-            }
-
-            function applyHelpFilter() {
-                if (!drawer || !helpSearch) return;
-                const q = normalizeQuery(helpSearch.value);
-                const sections = Array.from(drawer.querySelectorAll('.help-drawer-body .help-section'));
-                let shown = 0;
-
-                sections.forEach((sec) => {
-                    // Never hide the search box itself
-                    if (sec.getAttribute('aria-label') === 'Help search') {
-                        sec.style.display = '';
-                        return;
-                    }
-
-                    if (!q) {
-                        sec.style.display = '';
-                        shown += 1;
-                        return;
-                    }
-
-                    const text = (sec.innerText || sec.textContent || '').toLowerCase();
-                    const hit = text.includes(q);
-                    sec.style.display = hit ? '' : 'none';
-                    if (hit) shown += 1;
-                });
-
-                if (helpNoResults) {
-                    helpNoResults.style.display = (q && shown === 0) ? 'block' : 'none';
-                }
-            }
-
-            // Capture-phase handler so other listeners (e.g., onboarding) can't hijack Help.
-            if (helpBtn) {
-                helpBtn.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    openHelp();
-                }, true);
-            }
-            if (closeBtn) closeBtn.addEventListener('click', closeHelp);
-            if (overlay) overlay.addEventListener('click', closeHelp);
-            if (openFixitBtn) openFixitBtn.addEventListener('click', openFixitFromHelp);
-            if (helpSearch) {
-                helpSearch.addEventListener('input', applyHelpFilter);
-                helpSearch.addEventListener('keydown', (e) => {
-                    if (e.key === 'Escape') {
-                        helpSearch.value = '';
-                        applyHelpFilter();
-                        helpSearch.blur();
-                    }
-                });
-            }
-            document.addEventListener('keydown', (e) => {
-                if (e.key === 'Escape') closeHelp();
-            });
-
-            // Ensure the drawer starts unfiltered
-            try { applyHelpFilter(); } catch {}
-
-            // expose for optional future use
-            window.openHelp = openHelp;
-            window.closeHelp = closeHelp;
-        })();
-
-        // Robust wrapper so Templates buttons work even if the manager instance is not a global variable name.
-        function applyTemplate(id) {
-            if (window.manager && typeof window.manager.applyTemplate === 'function') {
-                window.manager.applyTemplate(id);
-                return;
-            }
-            console.warn('Manager not ready yet. Please wait a moment and try again.');
-            alert('Page is still loading. Please wait 1–2 seconds, then click the template again.');
-        }
-
-        // Run summary helpers (manager is created by app.js)
-        function exportRunSummary(format) {
-            if (!window.manager?.exportRunSummary) {
-                alert('Manager not ready yet.');
-                return;
-            }
-            window.manager.exportRunSummary(format);
-        }
-
-        function copyRunSummary() {
-            if (!window.manager?.copyRunSummary) {
-                alert('Manager not ready yet.');
-                return;
-            }
-            window.manager.copyRunSummary();
-        }
-
-        // Header tutorial button: always recoverable
-        (function () {
-            const btn = document.getElementById('showTutorialBtn');
-            if (!btn) return;
-            btn.addEventListener('click', () => {
-                if (!window.manager) {
-                    alert('Page is still loading. Please wait 1–2 seconds and try again.');
-                    return;
-                }
-                if (typeof window.manager.showOnboarding === 'function') window.manager.showOnboarding();
-                if (typeof window.manager.startTour === 'function') window.manager.startTour();
-            });
-        })();
-
-        function clearRunSummary() {
-            if (!window.manager?.clearRunSummary) {
-                alert('Manager not ready yet.');
-                return;
-            }
-            window.manager.clearRunSummary();
-        }
-
-        function exportRunHistory(format) {
-            if (!window.manager?.exportRunHistory) {
-                alert('Manager not ready yet.');
-                return;
-            }
-            window.manager.exportRunHistory(format);
-        }
-
-        function clearRunHistory() {
-            if (!window.manager?.clearRunHistory) {
-                alert('Manager not ready yet.');
-                return;
-            }
-            window.manager.clearRunHistory();
-        }
+        function applyTemplate(id) { window.manager?.applyTemplate?.(id); }
+        function exportRunSummary(f) { window.manager?.exportRunSummary?.(f); }
+        function clearRunSummary() { window.manager?.clearRunSummary?.(); }
+        function exportRunHistory(f) { window.manager?.exportRunHistory?.(f); }
+        function clearRunHistory() { window.manager?.clearRunHistory?.(); }
     </script>
     <script src="revidyne.js"></script>
-    <script src="app.js?v=20260113_5"></script>
+    <script src="app.js?v=20260129"></script>
 </body>
 </html>
