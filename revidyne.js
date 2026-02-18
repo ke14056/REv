@@ -79,13 +79,37 @@ class SerialCommander {
         try {
             const encoder = new TextEncoder();
             await this.writer.write(encoder.encode(command + '\n'));
+            console.log('[Serial] sent:', command);
         } catch (err) {
             console.error('发送命令错误:', err);
         }
     }
 
+    // Check if there's already data in the buffer
+    hasBufferedData() {
+        return this.readBuffer.includes('\n');
+    }
+
+    // Get next line from buffer without reading from serial
+    getBufferedLine() {
+        const lines = this.readBuffer.split('\n');
+        if (lines.length > 1) {
+            const response = lines[0].trim();
+            this.readBuffer = lines.slice(1).join('\n');
+            return response;
+        }
+        return null;
+    }
+
     async readResponse(timeout = 2000) {
         if (!this.reader) return '';
+        
+        // First check if we already have a complete line in the buffer
+        const buffered = this.getBufferedLine();
+        if (buffered !== null) {
+            console.log('[Serial] from buffer:', buffered);
+            return buffered;
+        }
         
         const decoder = new TextDecoder();
         const startTime = Date.now();
@@ -136,25 +160,27 @@ class BaseDevice extends SerialCommander {
     }
 
     async getCommands({ timeoutMs = 20000, maxCommands = 128 } = {}) {
-        // ECHO-LOOP PROTOCOL (matches Python House.set_up_cmds):
-        //   1) send("getCommands")
-        //   2) read() → first command
-        //   3) while cmdName != "eoc":
-        //        send(cmdName)   ← echo back to get next
-        //        read() → next command
-        //
-        // Arduino expects this acknowledgment handshake.
+        // Clear any old data in buffer
+        this.readBuffer = '';
+        
         await this.sendCommand('getCommands');
+        await this.sleep(800); // Give Arduino enough time to send all commands
 
         const lines = [];
         const start = Date.now();
         let blankStreak = 0;
-        const maxBlankStreak = 50; // Very high tolerance for Arduino delays
+        const maxBlankStreak = 10;
 
-        // First read
-        await this.sleep(300); // Give Arduino time to process
+        // Read first response
         let cmdName = await this.readResponse(3000);
         console.log('[getCommands] first read:', cmdName);
+
+        // If first read is empty, wait more and try again
+        if (!cmdName) {
+            await this.sleep(500);
+            cmdName = await this.readResponse(3000);
+            console.log('[getCommands] retry first read:', cmdName);
+        }
 
         while (Date.now() - start < timeoutMs && lines.length < maxCommands) {
             if (!cmdName) {
@@ -164,8 +190,8 @@ class BaseDevice extends SerialCommander {
                     console.log('[getCommands] too many blanks, stopping');
                     break;
                 }
-                await this.sleep(250); // Longer wait
-                cmdName = await this.readResponse(2000);
+                await this.sleep(150);
+                cmdName = await this.readResponse(1500);
                 continue;
             }
             blankStreak = 0;
@@ -178,15 +204,30 @@ class BaseDevice extends SerialCommander {
             lines.push(cmdName);
             console.log('[getCommands] collected:', cmdName);
 
-            // Echo-back: send the command name we just received
-            await this.sendCommand(cmdName);
-            await this.sleep(100); // Give Arduino time after echo
+            // Check if there's more data already in buffer (stream mode)
+            const buffered = this.getBufferedLine();
+            if (buffered !== null) {
+                cmdName = buffered;
+                console.log('[getCommands] from buffer:', cmdName);
+                continue;
+            }
+
+            // Try quick read first (Arduino might have already sent next)
+            cmdName = await this.readResponse(300);
+            if (cmdName) {
+                continue;
+            }
+
+            // Echo-back mode: send the command name to get next
+            console.log('[getCommands] echo-back:', lines[lines.length - 1]);
+            await this.sendCommand(lines[lines.length - 1]);
+            await this.sleep(150);
 
             // Read the next command
             cmdName = await this.readResponse(2000);
         }
 
-        console.log('[getCommands] total commands:', lines.length);
+        console.log('[getCommands] total commands:', lines.length, lines);
         return lines;
     }
 
@@ -207,10 +248,17 @@ class BaseDevice extends SerialCommander {
         }
 
         const cmd = this.cmds[cmdName];
+        console.log(`[call] Executing: ${cmdName}, inArg: ${cmd.inArg}, outArg: ${cmd.outArg}`);
 
         if (cmd.inArg === 0 && cmd.outArg === 0) {
             await this.sendCommand(cmdName);
-            return null;
+            // Wait a bit and try to read any response (even for no-output commands)
+            await this.sleep(200);
+            const response = await this.readResponse(500);
+            if (response) {
+                console.log(`[call] ${cmdName} response:`, response);
+            }
+            return response || 'OK';
         } else if (cmd.inArg !== 0 || cmd.outArg !== 0) {
             return await this.readCmdMessage(cmdName, returnValue || cmd.outArg !== 0);
         }
