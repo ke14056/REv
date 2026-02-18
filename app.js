@@ -10,7 +10,13 @@ class USBDeviceManager {
         this.lastScanAt = null;
         this.metrics = new Map();
         this.metricsIntervalId = null;
-        this.metricsIntervalMs = 1500;
+        this.metricsIntervalMs = 5000; // 5 seconds (slower for stability)
+
+        // Metrics filtering: store recent values to detect outliers
+        this.metricsHistory = new Map(); // deviceId -> { voltage: [], power: [] }
+        this.metricsHistorySize = 5; // keep last 5 readings
+        this.metricsMaxChangePercent = 200; // reject if change > 200%
+        this.metricsShowRaw = false; // Show raw values in console
 
         this.commandLog = [];
 
@@ -59,6 +65,9 @@ class USBDeviceManager {
     // Live metrics: show/hide helper details
     this.metricsDetailsKey = 'revidyne.metrics.details.v1';
     this.metricsDetailsEnabled = this.loadMetricsDetailsEnabled();
+
+    // Live metrics: prefer manual estimates over telemetry (useful for demos)
+    this.preferManualEstimates = this.loadPreferManualEstimatesEnabled();
 
         this.flowSteps = [];
         this.flowStorageKey = 'revidyne.flow.v1';
@@ -155,6 +164,29 @@ class USBDeviceManager {
         const toggle = document.getElementById('metricsShowDetailsToggle');
         if (toggle) toggle.checked = !!this.metricsDetailsEnabled;
         document.documentElement.classList.toggle('metrics-details-on', !!this.metricsDetailsEnabled);
+    }
+
+    // ---------------- Metrics: prefer manual estimates ----------------
+    loadPreferManualEstimatesEnabled() {
+        try {
+            return localStorage.getItem('revidyne.metrics.preferManualEstimates.v1') === '1';
+        } catch {
+            return false;
+        }
+    }
+
+    setPreferManualEstimatesEnabled(enabled) {
+        this.preferManualEstimates = Boolean(enabled);
+        try {
+            localStorage.setItem('revidyne.metrics.preferManualEstimates.v1', this.preferManualEstimates ? '1' : '0');
+        } catch {}
+        this.updatePreferManualEstimatesUI();
+        this.renderMetrics();
+    }
+
+    updatePreferManualEstimatesUI() {
+        const t = document.getElementById('preferManualEstimatesToggle');
+        if (t) t.checked = !!this.preferManualEstimates;
     }
 
     // ---------------- Connections: Mode 2 (apply to generator) ----------------
@@ -557,6 +589,484 @@ class USBDeviceManager {
                 try { this.drawConnections(); } catch {}
             });
         }
+
+        // Demand Request Mode UI
+        this.initDemandRequestUI();
+        
+        // Surplus Energy Handler UI
+        this.initSurplusHandlerUI();
+        
+        // Metrics Pause/Resume Button
+        this.initMetricsPauseBtn();
+    }
+
+    // ========== Metrics Pause/Resume ==========
+    initMetricsPauseBtn() {
+        const pauseBtn = document.getElementById('metricsPauseBtn');
+        if (pauseBtn && !pauseBtn._wired) {
+            pauseBtn._wired = true;
+            this.metricsPaused = false;
+            pauseBtn.addEventListener('click', () => this.toggleMetricsPause());
+        }
+        
+        const refreshBtn = document.getElementById('metricsRefreshBtn');
+        if (refreshBtn && !refreshBtn._wired) {
+            refreshBtn._wired = true;
+            refreshBtn.addEventListener('click', () => this.manualRefreshMetrics());
+        }
+        
+        const resetBtn = document.getElementById('metricsResetFilterBtn');
+        if (resetBtn && !resetBtn._wired) {
+            resetBtn._wired = true;
+            resetBtn.addEventListener('click', () => this.resetMetricsFilter());
+        }
+        
+        const rawBtn = document.getElementById('metricsRawBtn');
+        if (rawBtn && !rawBtn._wired) {
+            rawBtn._wired = true;
+            rawBtn.addEventListener('click', () => this.toggleMetricsRaw());
+        }
+    }
+
+    resetMetricsFilter() {
+        this.clearMetricsHistory();
+        console.log('[Metrics] Filter history cleared');
+        // Visual feedback
+        const resetBtn = document.getElementById('metricsResetFilterBtn');
+        if (resetBtn) {
+            const originalText = resetBtn.textContent;
+            resetBtn.textContent = '✅ Cleared';
+            setTimeout(() => {
+                resetBtn.textContent = originalText;
+            }, 1000);
+        }
+    }
+
+    toggleMetricsRaw() {
+        this.metricsShowRaw = !this.metricsShowRaw;
+        const rawBtn = document.getElementById('metricsRawBtn');
+        if (rawBtn) {
+            if (this.metricsShowRaw) {
+                rawBtn.textContent = '📊 Raw ON';
+                rawBtn.classList.add('active');
+                console.log('[Metrics] Raw logging enabled - check console for raw values');
+            } else {
+                rawBtn.textContent = '📊 Raw';
+                rawBtn.classList.remove('active');
+                console.log('[Metrics] Raw logging disabled');
+            }
+        }
+    }
+
+    toggleMetricsPause() {
+        const pauseBtn = document.getElementById('metricsPauseBtn');
+        if (!pauseBtn) return;
+        
+        if (this.metricsPaused) {
+            // Resume
+            this.metricsPaused = false;
+            this.ensureMetricsPolling();
+            pauseBtn.textContent = '⏸️ Pause';
+            pauseBtn.classList.remove('paused');
+            pauseBtn.title = 'Pause auto-refresh';
+            console.log('[Metrics] Resumed auto-refresh');
+        } else {
+            // Pause
+            this.metricsPaused = true;
+            this.stopMetricsPolling();
+            pauseBtn.textContent = '▶️ Resume';
+            pauseBtn.classList.add('paused');
+            pauseBtn.title = 'Resume auto-refresh';
+            console.log('[Metrics] Paused auto-refresh');
+        }
+    }
+
+    async manualRefreshMetrics() {
+        const refreshBtn = document.getElementById('metricsRefreshBtn');
+        if (refreshBtn) {
+            refreshBtn.disabled = true;
+            refreshBtn.textContent = '⏳ Refreshing...';
+        }
+        
+        try {
+            console.log('[Metrics] Manual refresh triggered');
+            await this.refreshLiveMetrics();
+        } catch (err) {
+            console.error('[Metrics] Manual refresh error:', err);
+        } finally {
+            if (refreshBtn) {
+                refreshBtn.disabled = false;
+                refreshBtn.textContent = '🔄 Refresh';
+            }
+        }
+    }
+
+    // ========== Surplus Energy Handler ==========
+    // Routes excess power to CVT or storage devices
+
+    initSurplusHandlerUI() {
+        const applyBtn = document.getElementById('surplusApplyBtn');
+        if (applyBtn && !applyBtn._wired) {
+            applyBtn._wired = true;
+            applyBtn.addEventListener('click', () => this.applySurplusToCVT());
+        }
+
+        // Update surplus display
+        this.updateSurplusDisplay();
+        this.updateSurplusTargetSelect();
+    }
+
+    updateSurplusDisplay() {
+        const supplyEl = document.getElementById('surplusSupply');
+        const demandEl = document.getElementById('surplusDemand');
+        const surplusEl = document.getElementById('surplusValue');
+
+        const supply = this.latestEstimatedSupplyKW || 0;
+        const demand = this.latestEstimatedDemandKW || 0;
+        const surplus = Math.max(0, supply - demand);
+
+        if (supplyEl) supplyEl.textContent = `${supply.toFixed(2)} kW`;
+        if (demandEl) demandEl.textContent = `${demand.toFixed(2)} kW`;
+        if (surplusEl) surplusEl.textContent = `${surplus.toFixed(2)} kW`;
+    }
+
+    updateSurplusTargetSelect() {
+        const select = document.getElementById('surplusTargetSelect');
+        if (!select) return;
+
+        // Find CVT devices or other storage/dump devices
+        const all = [
+            ...Array.from(this.connectedDevices.values()),
+            ...Array.from(this.availableDevices.values())
+        ];
+
+        // CVT is typically a consumer that can absorb excess power
+        const cvtDevices = all.filter(d => {
+            const name = String(d.name || '').toLowerCase();
+            return name.includes('cvt') || name.includes('storage') || name.includes('battery');
+        });
+
+        select.innerHTML = '<option value="">-- Select CVT/Storage --</option>';
+        for (const d of cvtDevices) {
+            const id = this.getConnDiagramId(d);
+            const icon = this.getDeviceIcon(d.name);
+            const opt = document.createElement('option');
+            opt.value = id;
+            opt.textContent = `${icon} ${d.name}`;
+            select.appendChild(opt);
+        }
+
+        // If no CVT found, also show all consumers as potential targets
+        if (cvtDevices.length === 0) {
+            const consumers = all.filter(d => d.type === 'consumer');
+            for (const d of consumers) {
+                const id = this.getConnDiagramId(d);
+                const icon = this.getDeviceIcon(d.name);
+                const opt = document.createElement('option');
+                opt.value = id;
+                opt.textContent = `${icon} ${d.name}`;
+                select.appendChild(opt);
+            }
+        }
+    }
+
+    async applySurplusToCVT() {
+        const select = document.getElementById('surplusTargetSelect');
+        const targetId = select?.value;
+
+        if (!targetId) {
+            this.showSurplusStatus('Please select a CVT or storage device.', 'warning');
+            return;
+        }
+
+        const supply = this.latestEstimatedSupplyKW || 0;
+        const demand = this.latestEstimatedDemandKW || 0;
+        const surplus = Math.max(0, supply - demand);
+
+        if (surplus <= 0) {
+            this.showSurplusStatus('No surplus energy to route. Supply ≤ Demand.', 'warning');
+            return;
+        }
+
+        // Find or create connection from providers to CVT
+        const all = [
+            ...Array.from(this.connectedDevices.values()),
+            ...Array.from(this.availableDevices.values())
+        ];
+
+        const providers = all.filter(d => d.type === 'provider');
+        if (providers.length === 0) {
+            this.showSurplusStatus('No providers connected.', 'warning');
+            return;
+        }
+
+        // Use generator as the main provider for surplus routing
+        const generator = providers.find(p => String(p.name || '').toLowerCase().includes('generator'));
+        const provider = generator || providers[0];
+        const providerId = this.getConnDiagramId(provider);
+
+        // Check if connection already exists
+        const existingEdge = (this.connections || []).find(e => e.fromId === providerId && e.toId === targetId);
+        
+        if (existingEdge) {
+            existingEdge.kw = surplus;
+        } else {
+            this.connections.push({ fromId: providerId, toId: targetId, kw: surplus });
+        }
+
+        this.saveConnections();
+        this.renderConnections();
+
+        // Try to send setLoad command to CVT if it supports it
+        const targetDevice = all.find(d => this.getConnDiagramId(d) === targetId);
+        if (targetDevice && this.connectedDevices.has(targetDevice.id)) {
+            const dev = this.connectedDevices.get(targetDevice.id);
+            if (dev.revidyneDevice && dev.commands && dev.commands.includes('setLoad')) {
+                try {
+                    await this.executeCommand(dev.id, 'setLoad', { 
+                        args: [String(surplus.toFixed(2))],
+                        prompt: null 
+                    });
+                    this.showSurplusStatus(
+                        `✅ Routed ${surplus.toFixed(2)} kW surplus to ${targetDevice.name}. setLoad command sent.`,
+                        'success'
+                    );
+                    return;
+                } catch (err) {
+                    console.error('Failed to set CVT load:', err);
+                }
+            }
+        }
+
+        this.showSurplusStatus(
+            `✅ Routed ${surplus.toFixed(2)} kW surplus to CVT. Connection updated.`,
+            'success'
+        );
+    }
+
+    showSurplusStatus(message, type = '') {
+        const statusEl = document.getElementById('surplusStatus');
+        if (!statusEl) return;
+        statusEl.textContent = message;
+        statusEl.className = 'surplus-status';
+        if (type) statusEl.classList.add(type);
+    }
+
+    // ========== Demand Request Mode (Multiple Rows) ==========
+    // Allows consumers to "request" power, automatically updating connections and generators
+
+    initDemandRequestUI() {
+        // Initialize demand requests array
+        if (!this.demandRequests) {
+            this.demandRequests = [];
+        }
+
+        const addBtn = document.getElementById('demandAddBtn');
+        if (addBtn && !addBtn._wired) {
+            addBtn._wired = true;
+            addBtn.addEventListener('click', () => this.addDemandRow());
+        }
+
+        const applyAllBtn = document.getElementById('demandApplyAllBtn');
+        if (applyAllBtn && !applyAllBtn._wired) {
+            applyAllBtn._wired = true;
+            applyAllBtn.addEventListener('click', () => this.applyAllDemandRequests());
+        }
+
+        const clearAllBtn = document.getElementById('demandClearAllBtn');
+        if (clearAllBtn && !clearAllBtn._wired) {
+            clearAllBtn._wired = true;
+            clearAllBtn.addEventListener('click', () => this.clearAllDemandRequests());
+        }
+
+        // Render existing rows
+        this.renderDemandRequestList();
+    }
+
+    getConsumerOptions() {
+        const all = [
+            ...Array.from(this.connectedDevices.values()),
+            ...Array.from(this.availableDevices.values())
+        ];
+        return all.filter(d => d.type === 'consumer');
+    }
+
+    addDemandRow(consumerId = '', powerKW = '') {
+        const rowId = Date.now();
+        this.demandRequests.push({ id: rowId, consumerId, powerKW });
+        this.renderDemandRequestList();
+    }
+
+    removeDemandRow(rowId) {
+        this.demandRequests = this.demandRequests.filter(r => r.id !== rowId);
+        this.renderDemandRequestList();
+    }
+
+    updateDemandRow(rowId, field, value) {
+        const row = this.demandRequests.find(r => r.id === rowId);
+        if (row) {
+            row[field] = value;
+        }
+        this.updateDemandTotal();
+    }
+
+    updateDemandTotal() {
+        const totalEl = document.getElementById('demandTotalKW');
+        if (!totalEl) return;
+
+        let total = 0;
+        for (const r of this.demandRequests) {
+            const kw = parseFloat(r.powerKW) || 0;
+            if (kw > 0) total += kw;
+        }
+        totalEl.textContent = `Total: ${total.toFixed(2)} kW`;
+    }
+
+    renderDemandRequestList() {
+        const listEl = document.getElementById('demandRequestList');
+        if (!listEl) return;
+
+        const consumers = this.getConsumerOptions();
+
+        if (this.demandRequests.length === 0) {
+            listEl.innerHTML = '<div class="demand-request-empty">No requests yet. Click "+ Add Request" to start.</div>';
+            this.updateDemandTotal();
+            return;
+        }
+
+        listEl.innerHTML = this.demandRequests.map(r => {
+            const consumerOptions = consumers.map(c => {
+                const id = this.getConnDiagramId(c);
+                const icon = this.getDeviceIcon(c.name);
+                const selected = id === r.consumerId ? 'selected' : '';
+                return `<option value="${this.encodeAttr(id)}" ${selected}>${icon} ${this.escapeHtml(c.name)}</option>`;
+            }).join('');
+
+            return `
+                <div class="demand-request-row" data-row-id="${r.id}">
+                    <select onchange="manager.updateDemandRow(${r.id}, 'consumerId', this.value)">
+                        <option value="">-- Select --</option>
+                        ${consumerOptions}
+                    </select>
+                    <input type="number" min="0" step="0.01" placeholder="kW" 
+                           value="${r.powerKW}" 
+                           onchange="manager.updateDemandRow(${r.id}, 'powerKW', this.value)"
+                           oninput="manager.updateDemandRow(${r.id}, 'powerKW', this.value)" />
+                    <button class="demand-row-remove" onclick="manager.removeDemandRow(${r.id})">✕</button>
+                </div>
+            `;
+        }).join('');
+
+        this.updateDemandTotal();
+    }
+
+    clearAllDemandRequests() {
+        this.demandRequests = [];
+        this.renderDemandRequestList();
+        this.showDemandStatus('All requests cleared.', '');
+    }
+
+    async applyAllDemandRequests() {
+        if (this.demandRequests.length === 0) {
+            this.showDemandStatus('No requests to apply. Add some first!', 'error');
+            return;
+        }
+
+        const validRequests = this.demandRequests.filter(r => {
+            const kw = parseFloat(r.powerKW) || 0;
+            return r.consumerId && kw > 0;
+        });
+
+        if (validRequests.length === 0) {
+            this.showDemandStatus('Please fill in consumer and power for at least one request.', 'error');
+            return;
+        }
+
+        let successCount = 0;
+        let totalKW = 0;
+
+        for (const req of validRequests) {
+            const consumerId = req.consumerId;
+            const powerKW = parseFloat(req.powerKW) || 0;
+
+            // Find or create connection to this consumer
+            const connectedProviders = (this.connections || [])
+                .filter(e => e.toId === consumerId)
+                .map(e => e.fromId);
+
+            if (connectedProviders.length === 0) {
+                this.autoConnectConsumerToProvider(consumerId);
+            }
+
+            // Update the connection kW for this consumer
+            const edges = (this.connections || []).filter(e => e.toId === consumerId);
+            if (edges.length === 1) {
+                edges[0].kw = powerKW;
+            } else if (edges.length > 1) {
+                const perProvider = powerKW / edges.length;
+                for (const e of edges) {
+                    e.kw = Math.round(perProvider * 100) / 100;
+                }
+            }
+
+            successCount++;
+            totalKW += powerKW;
+        }
+
+        this.saveConnections();
+        this.renderConnections();
+
+        // Apply Mode 2 to have the generator fill the deficit
+        try {
+            await this.applyConnectionsMode2({ source: 'demand-request-batch' });
+            
+            this.showDemandStatus(
+                `✅ Applied ${successCount} request(s), total ${totalKW.toFixed(2)} kW. Generator adjusted.`,
+                'success'
+            );
+        } catch (err) {
+            console.error('Demand request batch failed:', err);
+            this.showDemandStatus('Connections updated, but generator adjustment failed.', 'error');
+        }
+    }
+
+    autoConnectConsumerToProvider(consumerId) {
+        // Try to find a provider (prefer generator) and auto-create a connection
+        const all = [
+            ...Array.from(this.connectedDevices.values()),
+            ...Array.from(this.availableDevices.values())
+        ];
+
+        const providers = all.filter(d => d.type === 'provider');
+        if (providers.length === 0) return false;
+
+        // Prefer generator, otherwise use first provider
+        const generator = providers.find(p => String(p.name || '').toLowerCase().includes('generator'));
+        const provider = generator || providers[0];
+        const providerId = this.getConnDiagramId(provider);
+
+        // Create the connection
+        this.connections.push({ fromId: providerId, toId: consumerId, kw: 0 });
+        this.saveConnections();
+        this.showToast(`Auto-connected ${provider.name} → Consumer`);
+        return true;
+    }
+
+    getDeviceNameFromId(deviceId) {
+        const all = [
+            ...Array.from(this.connectedDevices.values()),
+            ...Array.from(this.availableDevices.values())
+        ];
+        const dev = all.find(d => this.getConnDiagramId(d) === deviceId);
+        return dev ? dev.name : deviceId;
+    }
+
+    showDemandStatus(message, type = '') {
+        const statusEl = document.getElementById('demandRequestStatus');
+        if (!statusEl) return;
+        statusEl.textContent = message;
+        statusEl.className = 'demand-request-status';
+        if (type) statusEl.classList.add(type);
     }
 
     renderConnections() {
@@ -568,6 +1078,14 @@ class USBDeviceManager {
         if (!providersEl || !consumersEl || !statusEl || !svg || !canvas) return;
 
         this.initConnectionsUI();
+        
+        // Update demand request list with current consumers
+        this.renderDemandRequestList();
+        
+        // Update surplus handler display
+        this.updateSurplusDisplay();
+        this.updateSurplusTargetSelect();
+        
         this.normalizeConnections();
         this.saveConnections();
 
@@ -911,12 +1429,27 @@ class USBDeviceManager {
 
     // Returns estimated kW based on manual inputs; falls back to telemetry if present.
     computeEstimatedKW(deviceInfo, metric) {
+        const name = deviceInfo ? deviceInfo.name : '';
+        const est = this.loadPowerEst(name) || {};
+
+        // If user prefers manual estimates (demo mode), try manual first.
+        if (this.preferManualEstimates && deviceInfo) {
+            if (deviceInfo.type === 'consumer') {
+                const ratedW = this.parsePositiveNumber(est.ratedW);
+                const util = this.clamp01(est.utilization ?? 1);
+                if (ratedW != null) return { kw: (ratedW * util) / 1000, source: 'estimate' };
+            }
+            if (deviceInfo.type === 'provider') {
+                const capacityKW = this.parsePositiveNumber(est.capacityKW);
+                const avail = this.clamp01(est.availability ?? 1);
+                if (capacityKW != null) return { kw: capacityKW * avail, source: 'estimate' };
+            }
+        }
+
+        // Default: telemetry first (if present)
         if (metric && metric.kw != null && Number.isFinite(Number(metric.kw))) {
             return { kw: Number(metric.kw), source: 'telemetry' };
         }
-
-        const name = deviceInfo ? deviceInfo.name : '';
-        const est = this.loadPowerEst(name) || {};
 
         if (deviceInfo && deviceInfo.type === 'consumer') {
             const ratedW = this.parsePositiveNumber(est.ratedW);
@@ -1117,10 +1650,22 @@ class USBDeviceManager {
     init() {
         document.getElementById('scanBtn').addEventListener('click', () => this.scanDevices());
 
+        // Navigation bar page switching
+        this.initNavbar();
+
         // Demo Cycle button
         const demoCycleBtn = document.getElementById('demoCycleBtn');
         if (demoCycleBtn) {
             demoCycleBtn.addEventListener('click', () => this.runDemoCycle());
+        }
+
+        // Tutorial button
+        const tutorialHeaderBtn = document.getElementById('showTutorialBtn');
+        if (tutorialHeaderBtn) {
+            tutorialHeaderBtn.addEventListener('click', () => {
+                this.showOnboarding();
+                this.startTour();
+            });
         }
 
         // Live metrics quick actions
@@ -1139,6 +1684,12 @@ class USBDeviceManager {
             detailsToggle.addEventListener('change', () => this.setMetricsDetailsEnabled(detailsToggle.checked));
         }
         this.updateMetricsDetailsUI();
+
+        const preferManualToggle = document.getElementById('preferManualEstimatesToggle');
+        if (preferManualToggle) {
+            preferManualToggle.addEventListener('change', () => this.setPreferManualEstimatesEnabled(preferManualToggle.checked));
+        }
+        this.updatePreferManualEstimatesUI();
         
     // Check Web Serial API support
         if (!navigator.serial) {
@@ -1256,6 +1807,49 @@ class USBDeviceManager {
         rows.forEach(r => r.classList.add('flash'));
 
         this.showToast('Edit Capacity/Availability (providers) and Rated/Utilization (consumers) below.', 'info');
+    }
+
+    // ========== Navigation Bar ==========
+    initNavbar() {
+        const navBtns = document.querySelectorAll('.nav-btn');
+        const pages = document.querySelectorAll('.nav-page');
+        
+        navBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const targetPage = btn.dataset.page;
+                
+                // Update active button
+                navBtns.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                
+                // Update active page
+                pages.forEach(p => p.classList.remove('active'));
+                const page = document.getElementById(`page-${targetPage}`);
+                if (page) {
+                    page.classList.add('active');
+                }
+                
+                // Save preference
+                try {
+                    localStorage.setItem('revidyne.currentPage', targetPage);
+                } catch {}
+            });
+        });
+        
+        // Restore last page from localStorage
+        try {
+            const savedPage = localStorage.getItem('revidyne.currentPage');
+            if (savedPage) {
+                const btn = document.querySelector(`.nav-btn[data-page="${savedPage}"]`);
+                if (btn) btn.click();
+            }
+        } catch {}
+    }
+
+    // Navigate to a specific page programmatically
+    navigateTo(pageName) {
+        const btn = document.querySelector(`.nav-btn[data-page="${pageName}"]`);
+        if (btn) btn.click();
     }
 
     updateAutoEstimateUI() {
@@ -2088,27 +2682,27 @@ class USBDeviceManager {
             {
                 title: 'Step 1: Scan devices',
                 body: 'Click “Scan Devices”, then choose your device in the browser popup dialog.',
-                getEl: () => document.getElementById('scanBtn')
+                getEl: () => document.getElementById('scanBtn'), page: 'devices'
             },
             {
                 title: 'Step 2: Move to Connected',
                 body: 'Drag a device card into “Connected Devices” to enable controls.',
-                getEl: () => document.querySelector('.right-panel')
+                getEl: () => document.querySelector('.right-panel'), page: 'devices'
             },
             {
                 title: 'Step 3: Run a command',
                 body: 'Click any command button on a connected device. Watch Last/Status/Time update.',
-                getEl: () => document.getElementById('connectedDevices')
+                getEl: () => document.getElementById('connectedDevices'), page: 'devices'
             },
             {
                 title: 'Step 4: Try a Scenario',
                 body: 'Scenarios run multiple devices. Start with Startup.',
-                getEl: () => document.querySelector('.controller')
+                getEl: () => document.querySelector('.controller'), page: 'logs'
             },
             {
                 title: 'Step 5: Build a Flow',
                 body: 'Drag commands from the Command library into Flow Builder, then Run flow.',
-                getEl: () => document.querySelector('.flow')
+                getEl: () => document.querySelector('.flow'), page: 'logs'
             }
         ];
     }
@@ -2153,6 +2747,11 @@ class USBDeviceManager {
         if (!this.tour.active) return;
         const step = this.tour.steps[this.tour.stepIndex];
         if (!step) return;
+
+        // Auto-navigate to the correct page if specified
+        if (step.page) {
+            this.navigateTo(step.page);
+        }
 
         this.clearTourHighlight();
 
@@ -2473,6 +3072,28 @@ class USBDeviceManager {
         const s = Array.isArray(value) ? String(value[0] ?? '') : String(value);
         const m = s.match(/-?\d+(?:\.\d+)?/);
         return m ? Number(m[0]) : null;
+    }
+
+    sanitizeMetricNumber(field, value) {
+        if (value == null) return null;
+        const n = Number(value);
+        if (!Number.isFinite(n)) return null;
+
+        // Voltage should never be negative in our UI.
+        // Also cap to a reasonable range for this project to avoid showing garbage
+        // when serial output is corrupted/misaligned.
+        if (field === 'volts') {
+            if (n < 0) return null;
+            if (n > 1000) return null;
+        }
+
+        // Power (kW) sanity: allow negative only if a board intentionally reports it.
+        // For now, keep as-is but drop absurd values.
+        if (field === 'kw') {
+            if (Math.abs(n) > 1000) return null;
+        }
+
+        return n;
     }
 
     sleep(ms) {
@@ -3282,13 +3903,25 @@ class USBDeviceManager {
             const dev = d.revidyneDevice;
             if (!dev) continue;
 
+            // Add delay between devices to prevent serial buffer issues
+            await this.sleep(300);
+
             const caps = this.getTelemetryCapabilities(dev);
 
             // Only call what exists (important: your generator list currently has no get* commands)
+            // Add small delays between commands to prevent buffer overflow
             const allResp = caps.getAll ? await this.safeCall(dev, 'getAll') : null;
+            if (caps.getAll) await this.sleep(100);
+            
             const kwResp = caps.getKW ? await this.safeCall(dev, 'getKW') : null;
+            if (caps.getKW) await this.sleep(100);
+            
             const voltsResp = caps.getVolts ? await this.safeCall(dev, 'getVolts') : null;
+            if (caps.getVolts) await this.sleep(100);
+            
             const valResp = caps.getVal ? await this.safeCall(dev, 'getVal') : null;
+            if (caps.getVal) await this.sleep(100);
+            
             const bvResp = caps.getBV ? await this.safeCall(dev, 'getBV') : null;
             const currentResp = caps.getCurrent ? await this.safeCall(dev, 'getCurrent') : null;
 
@@ -3312,10 +3945,22 @@ class USBDeviceManager {
 
             const currentmA = this.parseFirstNumber(currentResp);
 
+            // Log raw values for debugging
+            if (this.metricsShowRaw) {
+                console.log(`[Raw Metrics] ${d.name}: voltage=${volts}, power=${kw}`);
+            }
+
+            // DISABLED: Filtering was causing issues with values jumping between 0 and correct values
+            // Use raw values directly instead
+            const filteredVolts = this.sanitizeMetricNumber('volts', volts);
+            const filteredKw = this.sanitizeMetricNumber('kw', kw);
+
             const metric = {
                 updatedAt: now,
-                volts,
-                kw,
+                volts: filteredVolts,
+                kw: filteredKw,
+                rawVolts: volts,  // Store raw value for reference
+                rawKw: kw,        // Store raw value for reference
                 currentmA,
                 rawAll: allResp,
                 telemetryStatus: caps.any ? 'ok' : 'no-telemetry-cmds',
@@ -3325,6 +3970,74 @@ class USBDeviceManager {
         }
 
         this.renderMetrics();
+    }
+
+    // ========== Metrics Filtering ==========
+    // Filters out outlier values that jump too much from the moving average
+    filterMetricValue(deviceId, field, newValue) {
+        if (newValue == null || isNaN(newValue)) return null;
+
+        // Get or create history for this device
+        if (!this.metricsHistory.has(deviceId)) {
+            this.metricsHistory.set(deviceId, { volts: [], kw: [] });
+        }
+        const history = this.metricsHistory.get(deviceId);
+        const arr = history[field] || [];
+
+        // If no history yet, accept the value
+        if (arr.length === 0) {
+            arr.push(newValue);
+            history[field] = arr;
+            return newValue;
+        }
+
+        // Calculate moving average of recent values
+        const avg = arr.reduce((a, b) => a + b, 0) / arr.length;
+
+        // Check if new value is an outlier
+        // Special case: if avg is near zero, use absolute threshold
+        const absThreshold = 50; // Allow small fluctuations around zero
+        let isOutlier = false;
+
+        if (Math.abs(avg) < 10) {
+            // Near zero: use absolute difference
+            isOutlier = Math.abs(newValue - avg) > absThreshold && Math.abs(newValue) > absThreshold;
+        } else {
+            // Normal case: use percentage change
+            const changePercent = Math.abs((newValue - avg) / avg) * 100;
+            isOutlier = changePercent > this.metricsMaxChangePercent;
+        }
+
+        // Reject negative voltage (usually error)
+        if (field === 'volts' && newValue < 0) {
+            console.log(`[Metrics Filter] ${deviceId}.${field}: rejected negative value ${newValue}`);
+            return arr.length > 0 ? arr[arr.length - 1] : null; // Return last good value
+        }
+
+        if (isOutlier) {
+            console.log(`[Metrics Filter] ${deviceId}.${field}: rejected outlier ${newValue} (avg: ${avg.toFixed(2)})`);
+            // Return the last good value instead
+            return arr.length > 0 ? arr[arr.length - 1] : null;
+        }
+
+        // Accept value, add to history
+        arr.push(newValue);
+        // Keep only recent values
+        while (arr.length > this.metricsHistorySize) {
+            arr.shift();
+        }
+        history[field] = arr;
+
+        return newValue;
+    }
+
+    // Clear metrics history (call when device disconnects or on manual reset)
+    clearMetricsHistory(deviceId) {
+        if (deviceId) {
+            this.metricsHistory.delete(deviceId);
+        } else {
+            this.metricsHistory.clear();
+        }
     }
 
     renderMetrics() {
