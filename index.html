@@ -15,6 +15,13 @@
                     <input id="safeModeToggle" type="checkbox" />
                     <span class="safe-mode-label">Demo/Safe</span>
                 </label>
+                <div class="pi-gateway-control" title="Route commands through Raspberry Pi instead of direct WebSerial">
+                    <label class="pi-gateway-toggle">
+                        <input id="piGatewayToggle" type="checkbox" />
+                        <span class="pi-gateway-label">🌐 Pi Gateway</span>
+                    </label>
+                    <input id="piGatewayUrl" type="text" class="pi-gateway-url" placeholder="http://10.106.249.120:5000" />
+                </div>
                 <button id="demoCycleBtn" class="scan-btn" style="background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);">🔄 Demo Cycle</button>
                 <button id="demoTourBtn" class="scan-btn secondary" title="Step-by-step guided demo">🎬 Demo Tour</button>
                 <button id="showTutorialBtn" class="scan-btn secondary" title="Show tutorial">🎓 Tutorial</button>
