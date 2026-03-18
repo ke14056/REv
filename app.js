@@ -88,6 +88,12 @@ class USBDeviceManager {
     this.safeModeKey = 'revidyne.safeMode.enabled.v1';
     this.safeModeEnabled = this.loadSafeModeEnabled();
 
+    // Pi Gateway Mode: route commands through Raspberry Pi HTTP API instead of WebSerial
+    this.piGatewayKey = 'revidyne.piGateway.v1';
+    this.piGatewayBaseUrlKey = 'revidyne.piGateway.baseUrl.v1';
+    this.piGatewayEnabled = this.loadPiGatewayEnabled();
+    this.piGatewayBaseUrl = this.loadPiGatewayBaseUrl() || 'http://10.106.249.120:5000';
+
         // Onboarding / tutorial
         this.onboardingStorageKey = 'revidyne.onboarding.hidden.v1';
         this.tour = {
@@ -1646,6 +1652,217 @@ class USBDeviceManager {
         if (toggle) toggle.checked = !!this.safeModeEnabled;
         document.documentElement.classList.toggle('safe-mode-on', !!this.safeModeEnabled);
     }
+
+    // ---------------- Pi Gateway Mode ----------------
+    loadPiGatewayEnabled() {
+        try {
+            return localStorage.getItem(this.piGatewayKey) === '1';
+        } catch {
+            return false;
+        }
+    }
+
+    loadPiGatewayBaseUrl() {
+        try {
+            return localStorage.getItem(this.piGatewayBaseUrlKey) || '';
+        } catch {
+            return '';
+        }
+    }
+
+    setPiGatewayEnabled(enabled) {
+        this.piGatewayEnabled = Boolean(enabled);
+        try {
+            localStorage.setItem(this.piGatewayKey, this.piGatewayEnabled ? '1' : '0');
+        } catch {}
+        this.updatePiGatewayUI();
+        this.showToast(this.piGatewayEnabled 
+            ? `🌐 Pi Gateway: ON (${this.piGatewayBaseUrl})` 
+            : '🔌 Pi Gateway: OFF (using WebSerial)');
+    }
+
+    setPiGatewayBaseUrl(url) {
+        this.piGatewayBaseUrl = String(url || '').trim();
+        try {
+            localStorage.setItem(this.piGatewayBaseUrlKey, this.piGatewayBaseUrl);
+        } catch {}
+    }
+
+    updatePiGatewayUI() {
+        const toggle = document.getElementById('piGatewayToggle');
+        if (toggle) toggle.checked = !!this.piGatewayEnabled;
+        const urlInput = document.getElementById('piGatewayUrl');
+        if (urlInput) urlInput.value = this.piGatewayBaseUrl || '';
+        document.documentElement.classList.toggle('pi-gateway-on', !!this.piGatewayEnabled);
+    }
+
+    // Send command through Pi HTTP API
+    // Supports both remote (full URL) and local (relative path when hosted on Pi)
+    async piSendCommand(cmd, args = [], deviceName = null) {
+        // If baseUrl is empty or '/', use relative path (running on Pi)
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') {
+            baseUrl = '';  // Use relative URLs
+        }
+        
+        // Build the command string (cmd + args joined)
+        let fullCmd = cmd;
+        if (args && args.length > 0) {
+            fullCmd = [cmd, ...args].join(' ');
+        }
+        
+        // Build URL: /api/send/{device}/{cmd} or /api/send/{cmd}
+        let url;
+        if (deviceName) {
+            url = `${baseUrl}/api/send/${encodeURIComponent(deviceName)}/${encodeURIComponent(fullCmd)}`;
+        } else {
+            url = `${baseUrl}/api/send/${encodeURIComponent(fullCmd)}`;
+        }
+        
+        try {
+            const fetchOptions = baseUrl ? { method: 'GET', mode: 'cors' } : { method: 'GET' };
+            const resp = await fetch(url, fetchOptions);
+            const data = await resp.json();
+            if (this.debug) console.log('[Pi Gateway]', deviceName || 'default', cmd, args, '->', data);
+            // Return response array or success status
+            return data.response || (data.success ? ['OK'] : null);
+        } catch (e) {
+            console.error('[Pi Gateway] Error:', e);
+            this.showToast(`Pi Gateway error: ${e.message}`, 'error');
+            return null;
+        }
+    }
+
+    // Scan devices through Pi API
+    async piScanDevices() {
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+        
+        try {
+            this.showToast('Scanning devices via Pi...', 'warning');
+            const resp = await fetch(`${baseUrl}/api/scan`);
+            const data = await resp.json();
+            if (data.success && data.devices) {
+                const deviceTypes = Object.keys(data.devices);
+                const deviceInfo = data.deviceInfo || {};
+                
+                // Add each device to availableDevices
+                for (const [deviceType, portPath] of Object.entries(data.devices)) {
+                    const id = `pi_${deviceType}`;
+                    
+                    // Determine provider/consumer type
+                    let type = 'consumer';
+                    if (['generator', 'solartracker', 'windturbine'].includes(deviceType.toLowerCase())) {
+                        type = 'provider';
+                    }
+                    
+                    // Create device name with emoji
+                    const nameMap = {
+                        'generator': '🔌 Generator',
+                        'fan': '💨 Fan',
+                        'houseload': '🏠 House Load',
+                        'solartracker': '☀️ Solar Tracker',
+                        'windturbine': '💨 Wind Turbine',
+                        'cvt': '⚡ CVT'
+                    };
+                    const name = nameMap[deviceType.toLowerCase()] || `📟 ${deviceType}`;
+                    
+                    // Get commands from Pi response, or use defaults
+                    let commands = ['init', 'getCommands'];
+                    if (deviceInfo[deviceType] && deviceInfo[deviceType].commands) {
+                        commands = deviceInfo[deviceType].commands.filter(c => c && c.toLowerCase() !== 'eoc');
+                    }
+                    
+                    const deviceData = {
+                        id,
+                        name,
+                        type,
+                        piDeviceType: deviceType,
+                        piPortPath: portPath,
+                        isPiDevice: true,
+                        commands: commands,
+                        commandSignatures: {},
+                        isConnected: false
+                    };
+                    
+                    this.availableDevices.set(id, deviceData);
+                }
+                
+                this.lastScanAt = new Date();
+                this.updateUI();
+                this.showToast(`Found ${deviceTypes.length} devices: ${deviceTypes.join(', ')}`, 'success');
+                return data.devices;
+            } else {
+                this.showToast('No devices found', 'warning');
+            }
+            return {};
+        } catch (e) {
+            console.error('[Pi Gateway] Scan error:', e);
+            this.showToast(`Scan failed: ${e.message}`, 'error');
+            return {};
+        }
+    }
+
+    // Get device list from Pi
+    async piGetDevices() {
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+        
+        try {
+            const resp = await fetch(`${baseUrl}/api/devices`);
+            const data = await resp.json();
+            const devices = data.devices || {};
+            const deviceInfo = data.deviceInfo || {};
+            
+            // Add devices to availableDevices just like piScanDevices
+            for (const [deviceType, portPath] of Object.entries(devices)) {
+                const id = `pi_${deviceType}`;
+                
+                let type = 'consumer';
+                if (['generator', 'solartracker', 'windturbine'].includes(deviceType.toLowerCase())) {
+                    type = 'provider';
+                }
+                
+                const nameMap = {
+                    'generator': '🔌 Generator',
+                    'fan': '💨 Fan',
+                    'houseload': '🏠 House Load',
+                    'solartracker': '☀️ Solar Tracker',
+                    'windturbine': '💨 Wind Turbine',
+                    'cvt': '⚡ CVT'
+                };
+                const name = nameMap[deviceType.toLowerCase()] || `📟 ${deviceType}`;
+                
+                // Get commands from Pi response
+                let commands = ['init', 'getCommands'];
+                if (deviceInfo[deviceType] && deviceInfo[deviceType].commands) {
+                    commands = deviceInfo[deviceType].commands.filter(c => c && c.toLowerCase() !== 'eoc');
+                }
+                
+                const deviceData = {
+                    id,
+                    name,
+                    type,
+                    piDeviceType: deviceType,
+                    piPortPath: portPath,
+                    isPiDevice: true,
+                    commands: commands,
+                    commandSignatures: {},
+                    isConnected: false
+                };
+                
+                if (!this.availableDevices.has(id)) {
+                    this.availableDevices.set(id, deviceData);
+                }
+            }
+            
+            this.updateUI();
+            return devices;
+        } catch (e) {
+            console.error('[Pi Gateway] Get devices error:', e);
+            return {};
+        }
+    }
     
     init() {
         document.getElementById('scanBtn').addEventListener('click', () => this.scanDevices());
@@ -1690,18 +1907,37 @@ class USBDeviceManager {
             preferManualToggle.addEventListener('change', () => this.setPreferManualEstimatesEnabled(preferManualToggle.checked));
         }
         this.updatePreferManualEstimatesUI();
+
+        // Pi Gateway toggle
+        const piGatewayToggle = document.getElementById('piGatewayToggle');
+        if (piGatewayToggle) {
+            piGatewayToggle.addEventListener('change', () => this.setPiGatewayEnabled(piGatewayToggle.checked));
+        }
+        const piGatewayUrlInput = document.getElementById('piGatewayUrl');
+        if (piGatewayUrlInput) {
+            piGatewayUrlInput.addEventListener('change', () => this.setPiGatewayBaseUrl(piGatewayUrlInput.value));
+            piGatewayUrlInput.addEventListener('blur', () => this.setPiGatewayBaseUrl(piGatewayUrlInput.value));
+        }
+        this.updatePiGatewayUI();
         
-    // Check Web Serial API support
-        if (!navigator.serial) {
+    // Check Web Serial API support (skip if Pi Gateway is enabled)
+        if (!navigator.serial && !this.piGatewayEnabled) {
             this.showNotSupported();
             return;
         }
         
-    // Listen for serial connect/disconnect events
-        navigator.serial.addEventListener('connect', (e) => this.onPortConnect(e));
-        navigator.serial.addEventListener('disconnect', (e) => this.onPortDisconnect(e));
+    // Listen for serial connect/disconnect events (only if Web Serial available)
+        if (navigator.serial) {
+            navigator.serial.addEventListener('connect', (e) => this.onPortConnect(e));
+            navigator.serial.addEventListener('disconnect', (e) => this.onPortDisconnect(e));
+        }
         
         this.updateUI();
+
+        // If Pi Gateway is enabled, auto-load devices from Pi
+        if (this.piGatewayEnabled) {
+            this.piGetDevices();
+        }
 
         // Flow builder might exist in the page; initialize UI if present
         this.renderFlow();
@@ -2920,6 +3156,10 @@ class USBDeviceManager {
     }
     
     showNotSupported() {
+        // If Pi Gateway is enabled, don't show "not supported" - use Pi API instead
+        if (this.piGatewayEnabled) {
+            return;
+        }
         const msg = `
             <div class="empty-state">
                 <p>⚠️ Your browser doesn't support the Web Serial API</p>
@@ -2930,6 +3170,10 @@ class USBDeviceManager {
     }
     
     async scanDevices() {
+        // If Pi Gateway is enabled, use HTTP API instead of Web Serial
+        if (this.piGatewayEnabled) {
+            return this.piScanDevices();
+        }
         try {
             this.showToast('Scanning devices...', 'warning');
             console.log('[scanDevices] start: requesting serial port picker...');
@@ -3227,9 +3471,20 @@ class USBDeviceManager {
 
     getCommandsForDeviceId(deviceId) {
         const d = this.connectedDevices.get(deviceId);
-        if (!d || !d.revidyneDevice) return [];
-        const cmds = d.revidyneDevice.listCmds ? d.revidyneDevice.listCmds() : (d.commands || []);
-        return (cmds || []).filter(c => c && c !== 'eoc');
+        if (!d) return [];
+        // If this device is a WebSerial revidyneDevice, prefer its listCmds()
+        if (d.revidyneDevice) {
+            const cmds = d.revidyneDevice.listCmds ? d.revidyneDevice.listCmds() : (d.commands || []);
+            return (cmds || []).filter(c => c && c !== 'eoc');
+        }
+
+        // If this is a Pi-backed device, commands are stored in d.commands
+        if (Array.isArray(d.commands) && d.commands.length > 0) {
+            return d.commands.filter(c => c && String(c).toLowerCase() !== 'eoc');
+        }
+
+        // Fallback: empty list
+        return [];
     }
 
     addFlowStep() {
@@ -3881,8 +4136,14 @@ class USBDeviceManager {
         };
     }
 
-    async safeCall(revidyneDevice, cmd) {
+    async safeCall(revidyneDevice, cmd, args = []) {
         try {
+            // Pi Gateway mode: route through HTTP API instead of WebSerial
+            if (this.piGatewayEnabled) {
+                return await this.piSendCommand(cmd, args);
+            }
+            
+            // WebSerial mode (original)
             if (!revidyneDevice || !revidyneDevice.cmds || !revidyneDevice.cmds[cmd]) return null;
             return await revidyneDevice.call(cmd, true);
         } catch (e) {
@@ -4198,7 +4459,11 @@ class USBDeviceManager {
     
     async executeCommand(deviceId, cmdName, options = {}) {
         const device = this.connectedDevices.get(deviceId);
-        if (!device || !device.revidyneDevice) return;
+        if (!device) return;
+        
+        // Check if this is a Pi device (no revidyneDevice, but has isPiDevice flag)
+        const isPiDevice = device.isPiDevice === true;
+        if (!isPiDevice && !device.revidyneDevice) return;
 
         // Demo/Safe Mode guard: block set* commands (manual/scenario/flow)
         const isSetCmd = String(cmdName || '').toLowerCase().startsWith('set');
@@ -4265,7 +4530,20 @@ class USBDeviceManager {
 
             try {
                 let result;
-                if (args.length > 0) {
+                
+                // ========== Pi Device: use HTTP API ==========
+                if (isPiDevice) {
+                    const piDeviceType = device.piDeviceType || 'device1';
+                    // piSendCommand(cmd, args, deviceName) returns response array or null
+                    const apiResult = await this.piSendCommand(cmdName, args, piDeviceType);
+                    if (apiResult) {
+                        result = apiResult;
+                    } else {
+                        throw new Error('Pi command failed');
+                    }
+                }
+                // ========== WebSerial Device ==========
+                else if (args.length > 0) {
                     // For inArg commands, send cmd then args lines.
                     await this.withTimeout(dev.sendCommand(cmdName), timeoutMs, `${cmdName} send`);
                     for (const a of args) {
@@ -4346,7 +4624,20 @@ class USBDeviceManager {
     
     async disconnectDevice(deviceId) {
         const device = this.connectedDevices.get(deviceId) || this.availableDevices.get(deviceId);
-        if (!device || !device.revidyneDevice) return;
+        if (!device) return;
+        
+        // Pi devices: just remove from connected, add back to available
+        if (device.isPiDevice) {
+            this.connectedDevices.delete(deviceId);
+            device.isConnected = false;
+            this.availableDevices.set(deviceId, device);
+            this.showToast(`Disconnected: ${device.name}`);
+            this.updateUI();
+            return;
+        }
+        
+        // WebSerial devices: actually disconnect
+        if (!device.revidyneDevice) return;
         
         try {
             await device.revidyneDevice.disconnect();
