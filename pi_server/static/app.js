@@ -92,7 +92,7 @@ class USBDeviceManager {
     this.piGatewayKey = 'revidyne.piGateway.v1';
     this.piGatewayBaseUrlKey = 'revidyne.piGateway.baseUrl.v1';
     this.piGatewayEnabled = this.loadPiGatewayEnabled();
-    this.piGatewayBaseUrl = this.loadPiGatewayBaseUrl() || 'https://6154a267a3a668.lhr.life';
+    this.piGatewayBaseUrl = this.loadPiGatewayBaseUrl() || 'https://pennant-startle-earlobe.ngrok-free.dev';
 
     // Onboarding / tutorial
         this.onboardingStorageKey = 'revidyne.onboarding.hidden.v1';
