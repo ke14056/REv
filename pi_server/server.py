@@ -27,6 +27,12 @@ app = Flask(__name__, static_folder='static', static_url_path='')
 # IMPORTANT: set a strong secret in production. You can override with env var.
 app.secret_key = os.environ.get('REVIDYNE_SECRET_KEY', 'dev-change-me-please')
 
+# Fix Cross-Origin Cookies for GitHub Pages to Ngrok/LHR tunnel
+app.config.update(
+    SESSION_COOKIE_SAMESITE="None",
+    SESSION_COOKIE_SECURE=True
+)
+
 # CORS isn't strictly needed when serving the web app from the same origin,
 # but we keep it for compatibility with Pi Gateway remote usage.
 CORS(app, supports_credentials=True)
