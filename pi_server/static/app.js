@@ -92,7 +92,7 @@ class USBDeviceManager {
     this.piGatewayKey = 'revidyne.piGateway.v1';
     this.piGatewayBaseUrlKey = 'revidyne.piGateway.baseUrl.v1';
     this.piGatewayEnabled = this.loadPiGatewayEnabled();
-    this.piGatewayBaseUrl = this.loadPiGatewayBaseUrl() || 'https://916b5d7527a592.lhr.life';
+    this.piGatewayBaseUrl = this.loadPiGatewayBaseUrl() || 'https://6154a267a3a668.lhr.life';
 
     // Onboarding / tutorial
         this.onboardingStorageKey = 'revidyne.onboarding.hidden.v1';
