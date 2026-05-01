@@ -2345,6 +2345,21 @@ class USBDeviceManager {
         }
     }
 
+    async piGetPorts() {
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+
+        try {
+            const resp = await fetch(`${baseUrl}/api/ports`, { credentials: 'include' });
+            if (!resp.ok) return [];
+            const data = await resp.json();
+            return Array.isArray(data.ports) ? data.ports : [];
+        } catch (e) {
+            console.error('[Pi Gateway] Get ports error:', e);
+            return [];
+        }
+    }
+
     // Guess provider/consumer role from device name
     guessDeviceRole(name) {
         const n = name.toLowerCase();
@@ -4175,9 +4190,29 @@ class USBDeviceManager {
                 const scanResult = await this.piScanDevices();          // HTTP /api/scan
                 const deviceInfo = await this.piGetDeviceInfo();         // HTTP /api/devices → deviceInfo
 
-                if (!scanResult || Object.keys(scanResult).length === 0) {
-                    this.showToast('No devices found on Pi', 'error');
-                    return;
+                let effectiveScanResult = scanResult;
+                let effectiveDeviceInfo = deviceInfo;
+
+                if (!effectiveScanResult || Object.keys(effectiveScanResult).length === 0) {
+                    const ports = await this.piGetPorts();
+                    if (ports.length > 0) {
+                        effectiveScanResult = {};
+                        effectiveDeviceInfo = effectiveDeviceInfo || {};
+                        for (const port of ports) {
+                            const portName = String(port.device || '').replace(/^\/dev\//, '') || `port${Object.keys(effectiveScanResult).length + 1}`;
+                            effectiveScanResult[portName] = port.device || portName;
+                            if (!effectiveDeviceInfo[portName]) {
+                                effectiveDeviceInfo[portName] = {
+                                    port: port.device || portName,
+                                    commands: [],
+                                };
+                            }
+                        }
+                        this.showToast(`No scanned devices matched; showing ${ports.length} raw serial port(s) instead.`, 'warning');
+                    } else {
+                        this.showToast('No devices found on Pi', 'error');
+                        return;
+                    }
                 }
 
                 // Clear old Pi devices from the map
@@ -4185,9 +4220,9 @@ class USBDeviceManager {
                     if (d.isPiDevice) this.availableDevices.delete(id);
                 }
 
-                for (const [name, port] of Object.entries(scanResult)) {
+                for (const [name, port] of Object.entries(effectiveScanResult)) {
                     const id = `pi_${name}`;
-                    const cmds = (deviceInfo && deviceInfo[name] && deviceInfo[name].commands) || [];
+                    const cmds = (effectiveDeviceInfo && effectiveDeviceInfo[name] && effectiveDeviceInfo[name].commands) || [];
                     const parsed = this.parseFirmwareCommands(cmds);
 
                     this.availableDevices.set(id, {
@@ -4204,7 +4239,7 @@ class USBDeviceManager {
 
                 this.lastScanAt = new Date();
                 this.updateUI();
-                this.showToast(`Found ${Object.keys(scanResult).length} device(s) via Pi Gateway`, 'success');
+                this.showToast(`Found ${Object.keys(effectiveScanResult).length} device(s) via Pi Gateway`, 'success');
                 return;
             } catch (err) {
                 console.error('[Pi Gateway] scan error', err);
