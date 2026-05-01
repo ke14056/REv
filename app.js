@@ -112,6 +112,552 @@ class USBDeviceManager {
         this.init();
     }
 
+    // ========== Pre-planned Power Requests ==========
+    // Goal: user enters a target power (W). We check whether current non-generator supply
+    // (e.g., solar/wind) + a *safe* generator ramp can satisfy it.
+    // If not feasible, we show WAIT (retry) or REJECT (too large / missing generator).
+
+    loadPlannedRequestSettings() {
+        try {
+            const raw = localStorage.getItem('revidyne.plannedRequest.settings');
+            if (!raw) return null;
+            const obj = JSON.parse(raw);
+            return (obj && typeof obj === 'object') ? obj : null;
+        } catch {
+            return null;
+        }
+    }
+
+    savePlannedRequestSettings(settings) {
+        try {
+            localStorage.setItem('revidyne.plannedRequest.settings', JSON.stringify(settings || {}));
+        } catch {
+            // ignore
+        }
+    }
+
+    getPlannedRequestDefaults() {
+        return {
+            // Hard cap for generator target (kW) to avoid sudden shutdown from oversized requests.
+            // You can tune this in the UI.
+            maxGeneratorKW: 3.0,
+            // Ramp parameters to avoid sudden load jumps
+            rampStepKW: 0.2,
+            rampIntervalMs: 1500,
+            // Waiting behavior
+            allowWait: true,
+            waitTimeoutMs: 60_000,
+            retryIntervalMs: 3000,
+            // Keep a small headroom so we don't run at the edge
+            supplyMarginKW: 0.1,
+            // WAIT policy: if renewables are near-zero, we can choose to wait only when
+            // the required generator contribution is "large" (to avoid jumping the system).
+            // If the required generator is small, we allow OK and ramp immediately.
+            renewablesZeroThresholdKW: 0.03,
+            waitIfGenNeedAtLeastKW: 1.0
+        };
+    }
+
+    getPlannedRequestSettings() {
+        return { ...this.getPlannedRequestDefaults(), ...(this.loadPlannedRequestSettings() || {}) };
+    }
+
+    getConnectedGenerators() {
+        const connected = Array.from(this.connectedDevices.values());
+        return connected.filter(d => d.type === 'provider' && String(d.name || '').toLowerCase().includes('generator'));
+    }
+
+    estimateNonGeneratorSupplyKW() {
+        let kw = 0;
+        for (const d of Array.from(this.connectedDevices.values())) {
+            if (d.type !== 'provider') continue;
+            const name = String(d.name || '').toLowerCase();
+            if (name.includes('generator')) continue;
+            const metric = this.metrics.get(d.id);
+            const est = this.computeEstimatedKW(d, metric);
+            if (est && typeof est.kw === 'number' && Number.isFinite(est.kw)) kw += est.kw;
+        }
+        return kw;
+    }
+
+    // Build a simple ramp schedule from current generator load to the desired target.
+    // Returns: { stepsKW:number[], steps:number, intervalMs:number, etaMs:number, fromKW:number, toKW:number }
+    buildRampSchedule(fromKW, toKW, settings = null) {
+        const cfg = settings || this.getPlannedRequestSettings();
+        const step = Math.max(0.05, Number(cfg.rampStepKW) || 0.2);
+        const intervalMs = Math.max(200, Number(cfg.rampIntervalMs) || 1500);
+
+        const from = Number(fromKW);
+        const to = Number(toKW);
+        if (!Number.isFinite(from) || !Number.isFinite(to)) {
+            return { stepsKW: [], steps: 0, intervalMs, etaMs: 0, fromKW: from, toKW: to };
+        }
+
+        const stepsKW = [];
+        if (Math.abs(to - from) <= 1e-9) {
+            return { stepsKW, steps: 0, intervalMs, etaMs: 0, fromKW: from, toKW: to };
+        }
+
+        const dir = to > from ? 1 : -1;
+        let cur = from;
+        // Guard: cap number of steps to prevent accidental infinite loops
+        const maxSteps = 200;
+        for (let i = 0; i < maxSteps; i++) {
+            const next = dir > 0
+                ? Math.min(to, cur + step)
+                : Math.max(to, cur - step);
+            stepsKW.push(next);
+            cur = next;
+            if (Math.abs(cur - to) <= 1e-9) break;
+        }
+
+        return {
+            stepsKW,
+            steps: stepsKW.length,
+            intervalMs,
+            etaMs: stepsKW.length * intervalMs,
+            fromKW: from,
+            toKW: to
+        };
+    }
+
+    // Returns: { status:'ok'|'wait'|'reject', message, targetDemandKW, nonGenSupplyKW, targetGenKW, schedule }
+    planPowerRequest(targetDemandKW, settings = null) {
+        const cfg = settings || this.getPlannedRequestSettings();
+        const demand = Number(targetDemandKW);
+        if (!Number.isFinite(demand) || demand <= 0) {
+            return { status: 'reject', message: 'Invalid target demand.', targetDemandKW: null, nonGenSupplyKW: null, targetGenKW: null, schedule: null };
+        }
+
+        const gens = this.getConnectedGenerators();
+        if (!gens.length) {
+            return { status: 'reject', message: 'No generator connected.', targetDemandKW: demand, nonGenSupplyKW: null, targetGenKW: null, schedule: null };
+        }
+
+        const nonGenSupplyKW = this.estimateNonGeneratorSupplyKW();
+        const margin = Number(cfg.supplyMarginKW) || 0;
+        const needGen = Math.max(0, demand - nonGenSupplyKW + margin);
+
+        // Try to estimate current generator load for a more realistic schedule
+        let currentGenKW = 0;
+        try {
+            const genId = gens[0]?.id;
+            const last = genId && this.lastSetLoadByDeviceId && this.lastSetLoadByDeviceId.get(genId);
+            if (last && Number.isFinite(Number(last.valueKW))) currentGenKW = Number(last.valueKW);
+        } catch {
+            // ignore
+        }
+        const schedule = this.buildRampSchedule(currentGenKW, needGen, cfg);
+
+        const maxGen = Number(cfg.maxGeneratorKW);
+        if (Number.isFinite(maxGen) && needGen > maxGen + 1e-9) {
+            return {
+                status: 'reject',
+                message: `Request too large. Need generator ≈ ${needGen.toFixed(2)} kW, cap is ${maxGen.toFixed(2)} kW. Try splitting or reduce demand.`,
+                targetDemandKW: demand,
+                nonGenSupplyKW,
+                targetGenKW: needGen,
+                schedule
+            };
+        }
+
+        // WAIT policy (renewables-first):
+        // Only wait when renewables are near-zero AND the generator contribution would be large.
+        // This avoids always waiting for small loads (e.g., lights/low-power requests).
+        const zeroThresh = Number(cfg.renewablesZeroThresholdKW);
+        const waitGenNeed = Number(cfg.waitIfGenNeedAtLeastKW);
+        if (
+            cfg.allowWait &&
+            Number.isFinite(zeroThresh) &&
+            nonGenSupplyKW <= zeroThresh &&
+            (!Number.isFinite(waitGenNeed) || needGen >= waitGenNeed)
+        ) {
+            return {
+                status: 'wait',
+                message: 'Renewables are near 0 kW and generator need is large. Waiting briefly for solar/wind may reduce stress.',
+                targetDemandKW: demand,
+                nonGenSupplyKW,
+                targetGenKW: needGen,
+                schedule
+            };
+        }
+
+        return {
+            status: 'ok',
+            message: `OK. Non-generator supply ≈ ${nonGenSupplyKW.toFixed(2)} kW. Generator target ≈ ${needGen.toFixed(2)} kW.`,
+            targetDemandKW: demand,
+            nonGenSupplyKW,
+            targetGenKW: needGen,
+            schedule
+        };
+    }
+
+    formatDurationMs(ms) {
+        const v = Number(ms);
+        if (!Number.isFinite(v) || v <= 0) return '0s';
+        const s = Math.round(v / 1000);
+        if (s < 60) return `${s}s`;
+        const m = Math.floor(s / 60);
+        const r = s % 60;
+        return `${m}m ${r}s`;
+    }
+
+    formatPlannedSimulationReport(planResult, settings = null) {
+        if (!planResult) return '';
+        const cfg = settings || this.getPlannedRequestSettings();
+        const demand = planResult.targetDemandKW;
+        const nonGen = planResult.nonGenSupplyKW;
+        const genTarget = planResult.targetGenKW;
+        const margin = Number(cfg.supplyMarginKW) || 0;
+        const cap = Number(cfg.maxGeneratorKW);
+
+        const lines = [];
+        lines.push('Simulation summary');
+    lines.push('• Policy: renewables first, generator fills deficit');
+        if (Number.isFinite(demand)) lines.push(`• Target demand: ${demand.toFixed(2)} kW`);
+        if (Number.isFinite(nonGen)) lines.push(`• Non-generator supply (est.): ${nonGen.toFixed(2)} kW`);
+        if (Number.isFinite(margin) && margin > 0) lines.push(`• Safety margin: +${margin.toFixed(2)} kW`);
+        if (Number.isFinite(genTarget)) lines.push(`• Generator needed (est.): ${genTarget.toFixed(2)} kW`);
+        if (Number.isFinite(cap)) lines.push(`• Generator cap: ${cap.toFixed(2)} kW`);
+        lines.push(`• Result: ${String(planResult.status || '').toUpperCase()}`);
+
+        const sched = planResult.schedule;
+        if (sched && Array.isArray(sched.stepsKW)) {
+            lines.push(`• Ramp: step ${Math.max(0.05, Number(cfg.rampStepKW) || 0.2).toFixed(2)} kW every ${Math.max(200, Number(cfg.rampIntervalMs) || 1500)} ms`);
+            lines.push(`• Steps: ${sched.steps}  |  ETA: ${this.formatDurationMs(sched.etaMs)}`);
+            const preview = sched.stepsKW.slice(0, 4).map(v => `${Number(v).toFixed(2)}`).join(' → ');
+            if (preview) lines.push(`• Schedule preview: ${preview}${sched.stepsKW.length > 4 ? ' → …' : ''} kW`);
+        }
+
+        if (planResult.message) lines.push(`• Note: ${planResult.message}`);
+        return lines.join('\n');
+    }
+
+    renderPlannedScheduleViz(planResult, settings = null) {
+        const el = document.getElementById('plannedScheduleViz');
+        if (!el) return;
+
+        const sched = planResult && planResult.schedule;
+        if (!sched || !Array.isArray(sched.stepsKW) || sched.stepsKW.length === 0) {
+            el.innerHTML = '';
+            return;
+        }
+
+        // Visualize the first N steps as a simple bar chart
+        const N = Math.min(16, sched.stepsKW.length);
+        const slice = sched.stepsKW.slice(0, N);
+        const max = Math.max(...slice.map(v => Math.max(0, Number(v) || 0)), Math.max(0.001, Number(sched.toKW) || 0.001));
+
+        const barsHtml = slice.map(v => {
+            const h = Math.max(6, Math.round((Math.max(0, Number(v) || 0) / max) * 52));
+            return `<div class="planned-schedule-bar" style="height:${h}px" title="${Number(v).toFixed(2)} kW"></div>`;
+        }).join('');
+
+        const cfg = settings || this.getPlannedRequestSettings();
+        const meta = [
+            `From ${Number(sched.fromKW).toFixed(2)} → ${Number(sched.toKW).toFixed(2)} kW`,
+            `Steps: ${sched.steps}  |  ETA: ${this.formatDurationMs(sched.etaMs)}`,
+            `Step ${Math.max(0.05, Number(cfg.rampStepKW) || 0.2).toFixed(2)} kW every ${Math.max(200, Number(cfg.rampIntervalMs) || 1500)} ms`,
+            (sched.steps > N ? `Showing first ${N} steps.` : '')
+        ].filter(Boolean).join('\n');
+
+        el.innerHTML = `
+            <div class="planned-schedule-title">Ramp schedule preview</div>
+            <div class="planned-schedule-bars">${barsHtml}</div>
+            <div class="planned-schedule-meta">${meta}</div>
+        `;
+    }
+
+    showPlannedRequestStatus(message, type = '') {
+        const el = document.getElementById('plannedRequestStatus');
+        if (!el) return;
+        el.textContent = message;
+        el.className = 'planned-request-status';
+        if (type) el.classList.add(type);
+    }
+
+    formatPlannedQueueLine(item, index = 0) {
+        try {
+            const pr = item?.planResult;
+            const w = pr && Number.isFinite(Number(pr.targetDemandKW)) ? Math.round(Number(pr.targetDemandKW) * 1000) : null;
+            const gen = pr && Number.isFinite(Number(pr.targetGenKW)) ? Number(pr.targetGenKW) : null;
+            const ts = item?.enqueuedAt ? new Date(item.enqueuedAt) : null;
+            const t = ts ? `${String(ts.getHours()).padStart(2, '0')}:${String(ts.getMinutes()).padStart(2, '0')}:${String(ts.getSeconds()).padStart(2, '0')}` : '';
+            const parts = [];
+            parts.push(`#${index + 1}`);
+            if (w != null) parts.push(`${w}W`);
+            if (gen != null) parts.push(`gen→${gen.toFixed(2)}kW`);
+            if (t) parts.push(`@${t}`);
+            return parts.join(' ');
+        } catch {
+            return `#${index + 1}`;
+        }
+    }
+
+    renderPlannedQueueStatus({ header = '', headerType = '', currentLine = '', currentItem = null } = {}) {
+        const lines = [];
+        if (header) lines.push(header);
+        if (currentLine) lines.push(currentLine);
+
+        const q = Array.isArray(this._plannedExecuteQueue) ? this._plannedExecuteQueue : [];
+
+        // Show now/next indicators for clarity
+        const nowLine = currentItem ? this.formatPlannedQueueLine({ planResult: currentItem.planResult, enqueuedAt: currentItem.enqueuedAt }, 0) : '';
+        const nextItem = q.length ? q[0] : null;
+        const nextLine = nextItem ? this.formatPlannedQueueLine(nextItem, 0) : '';
+        if (nowLine || nextLine) {
+            lines.push('');
+            lines.push(`Now running: ${nowLine || '—'}`);
+            lines.push(`Next: ${nextLine || '—'}`);
+        }
+
+        if (q.length) {
+            lines.push('');
+            lines.push(`Queued (${q.length}):`);
+            q.forEach((item, i) => lines.push('  ' + this.formatPlannedQueueLine(item, i)));
+        }
+
+        this.showPlannedRequestStatus(lines.join('\n'), headerType);
+    }
+
+    cancelPlannedRamp() {
+        // Cancel current running job (if any) AND clear queued jobs.
+        if (this._plannedRampJob && this._plannedRampJob.cancel) {
+            this._plannedRampJob.cancel();
+        }
+        this._plannedRampJob = null;
+        this._plannedExecuteRunning = false;
+        if (Array.isArray(this._plannedExecuteQueue)) this._plannedExecuteQueue.length = 0;
+        this.renderPlannedQueueStatus({ header: 'Cancelled. (queue cleared)', headerType: '' });
+    }
+
+    enqueuePlannedExecution(planResult, settings) {
+        if (!this._plannedExecuteQueue) this._plannedExecuteQueue = [];
+        this._plannedExecuteQueue.push({ planResult, settings, enqueuedAt: Date.now() });
+        return this._plannedExecuteQueue.length;
+    }
+
+    async runPlannedExecutionQueue() {
+        if (this._plannedExecuteRunning) return;
+        this._plannedExecuteRunning = true;
+
+        try {
+            while (this._plannedExecuteQueue && this._plannedExecuteQueue.length) {
+                const item = this._plannedExecuteQueue.shift();
+                if (!item) continue;
+                this._plannedCurrentExecution = item;
+                await this.executePlannedRequest(item.planResult, item.settings, item);
+                this._plannedCurrentExecution = null;
+            }
+        } finally {
+            this._plannedExecuteRunning = false;
+            this._plannedCurrentExecution = null;
+        }
+    }
+
+    async executePlannedRequest(initialPlan, settings, currentItem = null) {
+        const s = settings || this.getPlannedRequestSettings();
+        let planned = initialPlan;
+        if (!planned) return;
+        if (planned.status === 'reject') return;
+
+        // Re-plan loop if WAIT
+        const start = Date.now();
+        let cur = planned;
+        while (cur.status === 'wait' && (Date.now() - start) < (s.waitTimeoutMs || 60_000)) {
+            const elapsed = Date.now() - start;
+            const timeout = (s.waitTimeoutMs || 60_000);
+            const remaining = Math.max(0, timeout - elapsed);
+            const retryMs = s.retryIntervalMs || 3000;
+            const nextTick = Math.min(retryMs, remaining);
+            const tries = Math.floor(elapsed / retryMs) + 1;
+
+            const report = this.formatPlannedSimulationReport(cur, s);
+            this.renderPlannedQueueStatus({
+                header: report || cur.message,
+                headerType: 'warning',
+                currentLine: `WAIT loop: try #${tries} | retry in ${(nextTick / 1000).toFixed(1)}s | remaining ${this.formatDurationMs(remaining)}`,
+                currentItem
+            });
+            this.renderPlannedScheduleViz(cur, s);
+            await this.sleep(nextTick);
+            cur = this.planPowerRequest(cur.targetDemandKW, s);
+            this._plannedLastPlan = cur;
+        }
+
+        if (cur.status !== 'ok') {
+            const t = cur.status === 'wait' ? 'warning' : 'error';
+            const report = this.formatPlannedSimulationReport(cur, s);
+            this.renderPlannedQueueStatus({ header: report || cur.message, headerType: t, currentItem });
+            this.renderPlannedScheduleViz(cur, s);
+            return;
+        }
+
+        // Pick a generator and ramp
+        const gens = this.getConnectedGenerators();
+        if (!gens.length) {
+            this.showPlannedRequestStatus('No generator connected.', 'error');
+            return;
+        }
+        const generator = gens[0];
+
+        {
+            const report = this.formatPlannedSimulationReport(cur, s);
+            this.renderPlannedQueueStatus({
+                header: report || '',
+                headerType: 'info',
+                currentLine: 'Executing ramp...',
+                currentItem
+            });
+            this.renderPlannedScheduleViz(cur, s);
+        }
+
+        await this.rampGeneratorToKW(generator.id, cur.targetGenKW, s, currentItem);
+    }
+
+    async rampGeneratorToKW(generatorDeviceId, targetKW, settings = null, currentItem = null) {
+        const cfg = settings || this.getPlannedRequestSettings();
+        const step = Math.max(0.05, Number(cfg.rampStepKW) || 0.2);
+        const intervalMs = Math.max(200, Number(cfg.rampIntervalMs) || 1500);
+
+        let current = 0;
+        try {
+            const last = this.lastSetLoadByDeviceId && this.lastSetLoadByDeviceId.get(generatorDeviceId);
+            if (last && Number.isFinite(Number(last.valueKW))) current = Number(last.valueKW);
+        } catch {
+            // ignore
+        }
+
+        const target = Math.max(0, Number(targetKW));
+        if (!Number.isFinite(target)) throw new Error('Invalid ramp target');
+
+        const job = { cancelled: false, cancel: () => (job.cancelled = true) };
+        this._plannedRampJob = job;
+
+        const dir = target >= current ? 1 : -1;
+        const nearly = (a, b) => Math.abs(a - b) <= 1e-6;
+
+        while (!job.cancelled && !nearly(current, target)) {
+            const next = dir > 0
+                ? Math.min(target, current + step)
+                : Math.max(target, current - step);
+
+            this.renderPlannedQueueStatus({
+                header: `Ramping...`,
+                headerType: 'info',
+                currentLine: `Generator: ${next.toFixed(2)} kW (target ${target.toFixed(2)} kW)`,
+                currentItem
+            });
+            await this.setGeneratorLoad(generatorDeviceId, next);
+
+            current = next;
+            await this.sleep(intervalMs);
+        }
+
+        if (!job.cancelled) {
+            this.renderPlannedQueueStatus({
+                header: `✅ Generator load reached ${target.toFixed(2)} kW.`,
+                headerType: 'success',
+                currentItem
+            });
+        }
+    }
+
+    initPlannedRequestUI() {
+        const input = document.getElementById('plannedTargetW');
+        const planBtn = document.getElementById('plannedPlanBtn');
+        const execBtn = document.getElementById('plannedExecuteBtn');
+        const cancelBtn = document.getElementById('plannedCancelBtn');
+        const maxGenInput = document.getElementById('plannedMaxGenKW');
+        const rampStepInput = document.getElementById('plannedRampStepKW');
+        const rampIntervalInput = document.getElementById('plannedRampIntervalMs');
+        const allowWaitToggle = document.getElementById('plannedAllowWait');
+
+        if (!input || !planBtn || !execBtn || !cancelBtn) return;
+
+        const cfg = this.getPlannedRequestSettings();
+        if (maxGenInput) maxGenInput.value = String(cfg.maxGeneratorKW);
+        if (rampStepInput) rampStepInput.value = String(cfg.rampStepKW);
+        if (rampIntervalInput) rampIntervalInput.value = String(cfg.rampIntervalMs);
+        if (allowWaitToggle) allowWaitToggle.checked = Boolean(cfg.allowWait);
+
+        const readSettingsFromUI = () => {
+            const cur = this.getPlannedRequestSettings();
+            const next = {
+                ...cur,
+                maxGeneratorKW: maxGenInput ? (this.parsePositiveNumber(maxGenInput.value) ?? cur.maxGeneratorKW) : cur.maxGeneratorKW,
+                rampStepKW: rampStepInput ? (this.parsePositiveNumber(rampStepInput.value) ?? cur.rampStepKW) : cur.rampStepKW,
+                rampIntervalMs: rampIntervalInput ? (this.parsePositiveNumber(rampIntervalInput.value) ?? cur.rampIntervalMs) : cur.rampIntervalMs,
+                allowWait: allowWaitToggle ? Boolean(allowWaitToggle.checked) : cur.allowWait
+            };
+            this.savePlannedRequestSettings(next);
+            return next;
+        };
+
+        const parseWToKW = (w) => {
+            const v = Number(w);
+            if (!Number.isFinite(v) || v <= 0) return null;
+            return v / 1000;
+        };
+
+        const doPlan = () => {
+            const s = readSettingsFromUI();
+            const kw = parseWToKW(input.value);
+            if (kw == null) {
+                this.showPlannedRequestStatus('Enter a positive target in W.', 'error');
+                return null;
+            }
+            const res = this.planPowerRequest(kw, s);
+            const t = res.status === 'ok' ? 'success' : (res.status === 'wait' ? 'warning' : 'error');
+            const report = this.formatPlannedSimulationReport(res, s);
+            this.showPlannedRequestStatus(report || res.message, t);
+            this.renderPlannedScheduleViz(res, s);
+            this._plannedLastPlan = res;
+            return res;
+        };
+
+        if (!planBtn._wired) {
+            planBtn._wired = true;
+            planBtn.addEventListener('click', () => doPlan());
+        }
+
+        if (!execBtn._wired) {
+            execBtn._wired = true;
+            execBtn.addEventListener('click', async () => {
+                const s = readSettingsFromUI();
+                const planned = doPlan();
+                if (!planned) return;
+
+                const qLen = this.enqueuePlannedExecution(planned, s);
+                if (this._plannedExecuteRunning) {
+                    const report = this.formatPlannedSimulationReport(planned, s);
+                    this.renderPlannedQueueStatus({
+                        header: report || planned.message,
+                        headerType: 'info',
+                        currentLine: `Queued request. Position: ${qLen}`,
+                        currentItem: this._plannedCurrentExecution || null
+                    });
+                    this.renderPlannedScheduleViz(planned, s);
+                    return;
+                }
+
+                await this.runPlannedExecutionQueue();
+            });
+        }
+
+        if (!cancelBtn._wired) {
+            cancelBtn._wired = true;
+            cancelBtn.addEventListener('click', () => this.cancelPlannedRamp());
+        }
+
+        const onChange = () => readSettingsFromUI();
+        for (const el of [maxGenInput, rampStepInput, rampIntervalInput, allowWaitToggle]) {
+            if (!el || el._wiredPlanned) continue;
+            el._wiredPlanned = true;
+            el.addEventListener('change', onChange);
+        }
+    }
+
     // ---------------- Firmware command parsing ----------------
     // Some boards report command “signatures” like:
     //   getKW<1
@@ -150,29 +696,7 @@ class USBDeviceManager {
         return out;
     }
 
-    loadMetricsDetailsEnabled() {
-        try {
-            return localStorage.getItem(this.metricsDetailsKey) === '1';
-        } catch {
-            return false;
-        }
-    }
-
-    setMetricsDetailsEnabled(enabled) {
-        this.metricsDetailsEnabled = Boolean(enabled);
-        try {
-            localStorage.setItem(this.metricsDetailsKey, this.metricsDetailsEnabled ? '1' : '0');
-        } catch {}
-        this.updateMetricsDetailsUI();
-    }
-
-    updateMetricsDetailsUI() {
-        const toggle = document.getElementById('metricsShowDetailsToggle');
-        if (toggle) toggle.checked = !!this.metricsDetailsEnabled;
-        document.documentElement.classList.toggle('metrics-details-on', !!this.metricsDetailsEnabled);
-    }
-
-    // ---------------- Metrics: prefer manual estimates ----------------
+    // Prefer manual estimates toggle (for demos)
     loadPreferManualEstimatesEnabled() {
         try {
             return localStorage.getItem('revidyne.metrics.preferManualEstimates.v1') === '1';
@@ -193,6 +717,29 @@ class USBDeviceManager {
     updatePreferManualEstimatesUI() {
         const t = document.getElementById('preferManualEstimatesToggle');
         if (t) t.checked = !!this.preferManualEstimates;
+    }
+
+    // ---------------- Live metrics: show/hide helper details ----------------
+    loadMetricsDetailsEnabled() {
+        try {
+            return localStorage.getItem(this.metricsDetailsKey) === '1';
+        } catch {
+            return false;
+        }
+    }
+
+    setMetricsDetailsEnabled(enabled) {
+        this.metricsDetailsEnabled = Boolean(enabled);
+        try {
+            localStorage.setItem(this.metricsDetailsKey, this.metricsDetailsEnabled ? '1' : '0');
+        } catch {}
+        this.updateMetricsDetailsUI();
+    }
+
+    updateMetricsDetailsUI() {
+        const toggle = document.getElementById('metricsShowDetailsToggle');
+        if (toggle) toggle.checked = !!this.metricsDetailsEnabled;
+        document.documentElement.classList.toggle('metrics-details-on', !!this.metricsDetailsEnabled);
     }
 
     // ---------------- Connections: Mode 2 (apply to generator) ----------------
@@ -1720,8 +2267,15 @@ class USBDeviceManager {
         }
         
         try {
-            const fetchOptions = baseUrl ? { method: 'GET', mode: 'cors' } : { method: 'GET' };
+            const fetchOptions = baseUrl
+                ? { method: 'GET', mode: 'cors', credentials: 'include' }
+                : { method: 'GET', credentials: 'include' };
             const resp = await fetch(url, fetchOptions);
+            if (resp.status === 401 || resp.status === 403) {
+                this.showToast('Please log in to use Scan/Send features.', 'warning');
+                this.updateAuthUI?.();
+                return null;
+            }
             const data = await resp.json();
             if (this.debug) console.log('[Pi Gateway]', deviceName || 'default', cmd, args, '->', data);
             // Return response array or success status
@@ -1739,66 +2293,20 @@ class USBDeviceManager {
         if (baseUrl === '/' || baseUrl === '') baseUrl = '';
         
         try {
-            this.showToast('Scanning devices via Pi...', 'warning');
-            const resp = await fetch(`${baseUrl}/api/scan`);
+            const resp = await fetch(`${baseUrl}/api/scan`, { credentials: 'include' });
+            if (resp.status === 401 || resp.status === 403) {
+                this.showToast('Please log in to scan devices.', 'warning');
+                this.updateAuthUI?.();
+                return {};
+            }
             const data = await resp.json();
             if (data.success && data.devices) {
-                const deviceTypes = Object.keys(data.devices);
-                const deviceInfo = data.deviceInfo || {};
-                
-                // Add each device to availableDevices
-                for (const [deviceType, portPath] of Object.entries(data.devices)) {
-                    const id = `pi_${deviceType}`;
-                    
-                    // Determine provider/consumer type
-                    let type = 'consumer';
-                    if (['generator', 'solartracker', 'windturbine'].includes(deviceType.toLowerCase())) {
-                        type = 'provider';
-                    }
-                    
-                    // Create device name with emoji
-                    const nameMap = {
-                        'generator': '🔌 Generator',
-                        'fan': '💨 Fan',
-                        'houseload': '🏠 House Load',
-                        'solartracker': '☀️ Solar Tracker',
-                        'windturbine': '💨 Wind Turbine',
-                        'cvt': '⚡ CVT'
-                    };
-                    const name = nameMap[deviceType.toLowerCase()] || `📟 ${deviceType}`;
-                    
-                    // Get commands from Pi response, or use defaults
-                    let commands = ['init', 'getCommands'];
-                    if (deviceInfo[deviceType] && deviceInfo[deviceType].commands) {
-                        commands = deviceInfo[deviceType].commands.filter(c => c && c.toLowerCase() !== 'eoc');
-                    }
-                    
-                    const deviceData = {
-                        id,
-                        name,
-                        type,
-                        piDeviceType: deviceType,
-                        piPortPath: portPath,
-                        isPiDevice: true,
-                        commands: commands,
-                        commandSignatures: {},
-                        isConnected: false
-                    };
-                    
-                    this.availableDevices.set(id, deviceData);
-                }
-                
-                this.lastScanAt = new Date();
-                this.updateUI();
-                this.showToast(`Found ${deviceTypes.length} devices: ${deviceTypes.join(', ')}`, 'success');
+                this.showToast(`Found ${Object.keys(data.devices).length} devices: ${Object.keys(data.devices).join(', ')}`, 'success');
                 return data.devices;
-            } else {
-                this.showToast('No devices found', 'warning');
             }
             return {};
         } catch (e) {
             console.error('[Pi Gateway] Scan error:', e);
-            this.showToast(`Scan failed: ${e.message}`, 'error');
             return {};
         }
     }
@@ -1809,63 +2317,553 @@ class USBDeviceManager {
         if (baseUrl === '/' || baseUrl === '') baseUrl = '';
         
         try {
-            const resp = await fetch(`${baseUrl}/api/devices`);
-            const data = await resp.json();
-            const devices = data.devices || {};
-            const deviceInfo = data.deviceInfo || {};
-            
-            // Add devices to availableDevices just like piScanDevices
-            for (const [deviceType, portPath] of Object.entries(devices)) {
-                const id = `pi_${deviceType}`;
-                
-                let type = 'consumer';
-                if (['generator', 'solartracker', 'windturbine'].includes(deviceType.toLowerCase())) {
-                    type = 'provider';
-                }
-                
-                const nameMap = {
-                    'generator': '🔌 Generator',
-                    'fan': '💨 Fan',
-                    'houseload': '🏠 House Load',
-                    'solartracker': '☀️ Solar Tracker',
-                    'windturbine': '💨 Wind Turbine',
-                    'cvt': '⚡ CVT'
-                };
-                const name = nameMap[deviceType.toLowerCase()] || `📟 ${deviceType}`;
-                
-                // Get commands from Pi response
-                let commands = ['init', 'getCommands'];
-                if (deviceInfo[deviceType] && deviceInfo[deviceType].commands) {
-                    commands = deviceInfo[deviceType].commands.filter(c => c && c.toLowerCase() !== 'eoc');
-                }
-                
-                const deviceData = {
-                    id,
-                    name,
-                    type,
-                    piDeviceType: deviceType,
-                    piPortPath: portPath,
-                    isPiDevice: true,
-                    commands: commands,
-                    commandSignatures: {},
-                    isConnected: false
-                };
-                
-                if (!this.availableDevices.has(id)) {
-                    this.availableDevices.set(id, deviceData);
-                }
+            const resp = await fetch(`${baseUrl}/api/devices`, { credentials: 'include' });
+            if (resp.status === 401 || resp.status === 403) {
+                return {};
             }
-            
-            this.updateUI();
-            return devices;
+            const data = await resp.json();
+            return data.devices || {};
         } catch (e) {
             console.error('[Pi Gateway] Get devices error:', e);
             return {};
         }
     }
+
+    // Get detailed device info (including commands) from Pi
+    async piGetDeviceInfo() {
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+
+        try {
+            const resp = await fetch(`${baseUrl}/api/devices`, { credentials: 'include' });
+            if (!resp.ok) return {};
+            const data = await resp.json();
+            return data.deviceInfo || {};
+        } catch (e) {
+            console.error('[Pi Gateway] Get device info error:', e);
+            return {};
+        }
+    }
+
+    // Guess provider/consumer role from device name
+    guessDeviceRole(name) {
+        const n = name.toLowerCase();
+        if (n.includes('generator') || n.includes('solar') || n.includes('wind')) return 'provider';
+        return 'consumer';
+    }
+
+    // ============ Auth (Session Cookie) ============
+    initAuthUI() {
+        const form = document.getElementById('loginForm');
+        if (form) {
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const username = (document.getElementById('loginUsername')?.value || '').trim();
+                const password = document.getElementById('loginPassword')?.value || '';
+                await this.login(username, password);
+            });
+        }
+
+        const logoutBtn = document.getElementById('logoutBtn');
+        if (logoutBtn) {
+            logoutBtn.addEventListener('click', () => this.logout());
+        }
+    }
+
+    async fetchMe() {
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+
+        try {
+            const resp = await fetch(`${baseUrl}/api/auth/me`, {
+                credentials: 'include',
+            });
+            const data = await resp.json().catch(() => ({}));
+            return data.user || null;
+        } catch {
+            return null;
+        }
+    }
+
+    async login(username, password) {
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+
+        try {
+            const resp = await fetch(`${baseUrl}/api/auth/login`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) {
+                this.showToast(data.error || 'Login failed', 'error');
+                await this.updateAuthUI();
+                return false;
+            }
+            this.showToast(`Logged in as ${data.user?.username || username}`, 'success');
+            await this.updateAuthUI();
+            return true;
+        } catch (e) {
+            this.showToast(`Login error: ${e.message}`, 'error');
+            return false;
+        }
+    }
+
+    async logout() {
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+
+        try {
+            await fetch(`${baseUrl}/api/auth/logout`, {
+                method: 'POST',
+                credentials: 'include',
+            });
+        } finally {
+            this.showToast('Logged out', 'success');
+            await this.updateAuthUI();
+        }
+    }
+
+    async updateAuthUI() {
+        const user = await this.fetchMe();
+        this.currentUser = user;
+
+        const statusEl = document.getElementById('authStatus');
+        const loginWrap = document.getElementById('loginFormWrap');
+        const userWrap = document.getElementById('userInfoWrap');
+        const adminNav = document.getElementById('navAdminBtn');
+
+        if (user) {
+            if (statusEl) statusEl.textContent = `${user.username} (${user.role})`;
+            if (loginWrap) loginWrap.style.display = 'none';
+            if (userWrap) userWrap.style.display = '';
+            // Show admin tab for admin role
+            if (adminNav) adminNav.style.display = (user.role === 'admin') ? '' : 'none';
+            // Auto-load admin user list if admin
+            if (user.role === 'admin') {
+                this.adminLoadUsers();
+                this.adminLoadApiKeys();
+            }
+        } else {
+            if (statusEl) statusEl.textContent = 'Not logged in';
+            if (loginWrap) loginWrap.style.display = '';
+            if (userWrap) userWrap.style.display = 'none';
+            if (adminNav) adminNav.style.display = 'none';
+        }
+    }
+
+    // ============ Admin Panel ============
+
+    initAdminUI() {
+        const form = document.getElementById('adminCreateForm');
+        if (form) {
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                await this.adminCreateUser();
+            });
+        }
+        const refreshBtn = document.getElementById('adminRefreshBtn');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', () => this.adminLoadUsers());
+        }
+
+        const keyForm = document.getElementById('adminCreateKeyForm');
+        if (keyForm) {
+            keyForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                await this.adminCreateApiKey();
+            });
+        }
+
+        const keyRefreshBtn = document.getElementById('adminKeysRefreshBtn');
+        if (keyRefreshBtn) {
+            keyRefreshBtn.addEventListener('click', () => this.adminLoadApiKeys());
+        }
+    }
+
+    async adminLoadUsers() {
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+
+        const tbody = document.getElementById('adminUsersBody');
+        if (!tbody) return;
+
+        try {
+            const resp = await fetch(`${baseUrl}/api/users`, { credentials: 'include' });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) {
+                tbody.innerHTML = `<tr><td colspan="6" class="empty-state">${data.error || 'Access denied'}</td></tr>`;
+                return;
+            }
+
+            this._adminUsers = data.users || [];
+            this.renderAdminKeyUserDefaults();
+            // Collect known device names from the users' permissions + available/connected devices
+            this._adminKnownDevices = this._collectKnownDevices();
+
+            if (this._adminUsers.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No users</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = this._adminUsers.map(u => {
+                const perms = (u.permissions || []).join(', ') || (u.role === 'admin' ? '<em>all (admin)</em>' : u.role === 'viewer' ? '<em>none (viewer)</em>' : '<em>none set</em>');
+                const created = u.created_at ? new Date(u.created_at).toLocaleString() : '—';
+                const isSelf = this.currentUser && this.currentUser.id === u.id;
+                return `<tr>
+                    <td>${u.id}</td>
+                    <td>${this._esc(u.username)}${isSelf ? ' <span class="admin-you">(you)</span>' : ''}</td>
+                    <td><span class="admin-role-badge admin-role-${u.role}">${u.role}</span></td>
+                    <td>${perms}</td>
+                    <td class="admin-created">${created}</td>
+                    <td class="admin-actions-cell">
+                        ${u.role === 'operator' ? `<button class="admin-btn tiny" onclick="manager.openPermModal(${u.id})">✏️ Permissions</button>` : ''}
+                        ${!isSelf ? `<button class="admin-btn tiny danger" onclick="manager.adminDeleteUser(${u.id}, '${this._esc(u.username)}')">🗑️</button>` : ''}
+                    </td>
+                </tr>`;
+            }).join('');
+        } catch (e) {
+            tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Error: ${e.message}</td></tr>`;
+        }
+    }
+
+    renderAdminKeyUserDefaults() {
+        const input = document.getElementById('adminKeyUsername');
+        if (!input) return;
+        if ((input.value || '').trim()) return;
+
+        const currentUsername = this.currentUser?.username;
+        if (currentUsername) {
+            input.value = currentUsername;
+            return;
+        }
+
+        const first = (this._adminUsers || [])[0];
+        if (first?.username) input.value = first.username;
+    }
+
+    async adminLoadApiKeys() {
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+
+        const tbody = document.getElementById('adminKeysBody');
+        if (!tbody) return;
+
+        try {
+            const resp = await fetch(`${baseUrl}/api/auth/api-keys`, { credentials: 'include' });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) {
+                tbody.innerHTML = `<tr><td colspan="8" class="empty-state">${data.error || 'Access denied'}</td></tr>`;
+                return;
+            }
+
+            const keys = data.keys || [];
+            this._adminApiKeys = keys;
+
+            if (!keys.length) {
+                tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No API keys yet</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = keys.map(k => {
+                const created = k.created_at ? new Date(k.created_at).toLocaleString() : '—';
+                const lastUsed = k.last_used_at ? new Date(k.last_used_at).toLocaleString() : 'Never';
+                const active = Number(k.is_active) === 1;
+                const statusBadge = active
+                    ? '<span class="admin-role-badge admin-key-active">active</span>'
+                    : '<span class="admin-role-badge admin-key-revoked">revoked</span>';
+                const safeRole = this._esc(k.role || 'viewer');
+                const roleBadge = `<span class="admin-role-badge admin-role-${safeRole}">${safeRole}</span>`;
+                const safeName = this._esc(k.name || 'default');
+
+                return `<tr>
+                    <td>${k.id}</td>
+                    <td>${safeName}</td>
+                    <td>${this._esc(k.username || '—')}</td>
+                    <td>${roleBadge}</td>
+                    <td>${statusBadge}</td>
+                    <td class="admin-created">${created}</td>
+                    <td class="admin-created">${lastUsed}</td>
+                    <td class="admin-actions-cell">
+                        ${active ? `<button class="admin-btn tiny danger" onclick="manager.adminDeleteApiKey(${k.id}, '${safeName}')">🗑️ Revoke</button>` : '—'}
+                    </td>
+                </tr>`;
+            }).join('');
+        } catch (e) {
+            tbody.innerHTML = `<tr><td colspan="8" class="empty-state">Error: ${e.message}</td></tr>`;
+        }
+    }
+
+    async adminCreateApiKey() {
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+
+        const username = (document.getElementById('adminKeyUsername')?.value || '').trim();
+        const nameRaw = (document.getElementById('adminKeyName')?.value || '').trim();
+        const name = nameRaw || 'default';
+
+        if (!username) {
+            this.showToast('Owner username is required', 'error');
+            return;
+        }
+
+        try {
+            const resp = await fetch(`${baseUrl}/api/auth/api-keys`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, name }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) {
+                this.showToast(data.error || 'Create API key failed', 'error');
+                return;
+            }
+
+            const newKey = data.key?.apiKey || '';
+            this._adminLatestApiKey = newKey;
+
+            const resultEl = document.getElementById('adminApiKeyResult');
+            if (resultEl && newKey) {
+                resultEl.style.display = '';
+                resultEl.innerHTML = `
+                    <div class="admin-key-result-title">✅ API key created for <strong>${this._esc(username)}</strong> (${this._esc(name)})</div>
+                    <div class="admin-key-value-row">
+                        <code id="adminLatestApiKey" class="admin-key-value">${this._esc(newKey)}</code>
+                        <button type="button" id="adminCopyLatestKeyBtn" class="admin-btn tiny">Copy</button>
+                    </div>
+                    <div class="admin-key-result-note">Store this key now. It will not be shown again.</div>
+                `;
+
+                const copyBtn = document.getElementById('adminCopyLatestKeyBtn');
+                if (copyBtn) {
+                    copyBtn.addEventListener('click', async () => {
+                        await this.copyLatestApiKey();
+                    });
+                }
+            }
+
+            this.showToast('API key created', 'success');
+            const keyNameInput = document.getElementById('adminKeyName');
+            if (keyNameInput) keyNameInput.value = '';
+            await this.adminLoadApiKeys();
+        } catch (e) {
+            this.showToast(`Create key error: ${e.message}`, 'error');
+        }
+    }
+
+    async copyLatestApiKey() {
+        const key = this._adminLatestApiKey || '';
+        if (!key) {
+            this.showToast('No API key to copy', 'warning');
+            return;
+        }
+
+        try {
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(key);
+            } else {
+                const temp = document.createElement('textarea');
+                temp.value = key;
+                document.body.appendChild(temp);
+                temp.select();
+                document.execCommand('copy');
+                document.body.removeChild(temp);
+            }
+            this.showToast('API key copied', 'success');
+        } catch (e) {
+            this.showToast(`Copy failed: ${e.message}`, 'error');
+        }
+    }
+
+    async adminDeleteApiKey(keyId, keyName = '') {
+        if (!confirm(`Revoke API key #${keyId}${keyName ? ` (${keyName})` : ''}?`)) return;
+
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+
+        try {
+            const resp = await fetch(`${baseUrl}/api/auth/api-keys/${keyId}`, {
+                method: 'DELETE',
+                credentials: 'include',
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) {
+                this.showToast(data.error || 'Revoke failed', 'error');
+                return;
+            }
+
+            this.showToast(`API key #${keyId} revoked`, 'success');
+            await this.adminLoadApiKeys();
+        } catch (e) {
+            this.showToast(`Revoke error: ${e.message}`, 'error');
+        }
+    }
+
+    _collectKnownDevices() {
+        const s = new Set();
+        // From available/connected devices
+        for (const [, d] of this.availableDevices) {
+            if (d.name) s.add(d.name.toLowerCase());
+        }
+        for (const [, d] of this.connectedDevices) {
+            if (d.name) s.add(d.name.toLowerCase());
+        }
+        // From all users' existing permissions
+        if (this._adminUsers) {
+            for (const u of this._adminUsers) {
+                if (u.permissions) u.permissions.forEach(p => s.add(p.toLowerCase()));
+            }
+        }
+        // Always include the four standard devices
+        ['generator', 'fan', 'houseload', 'solartracker'].forEach(d => s.add(d));
+        return [...s].sort();
+    }
+
+    _esc(str) {
+        const d = document.createElement('div');
+        d.textContent = str;
+        return d.innerHTML;
+    }
+
+    async adminCreateUser() {
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+
+        const username = (document.getElementById('adminNewUsername')?.value || '').trim();
+        const password = document.getElementById('adminNewPassword')?.value || '';
+        const role = document.getElementById('adminNewRole')?.value || 'operator';
+        const devicesRaw = (document.getElementById('adminNewDevices')?.value || '').trim();
+        const devices = devicesRaw ? devicesRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+        if (!username || !password) {
+            this.showToast('Username and password are required', 'error');
+            return;
+        }
+
+        try {
+            const resp = await fetch(`${baseUrl}/api/users`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, role, devices }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) {
+                this.showToast(data.error || 'Create failed', 'error');
+                return;
+            }
+            this.showToast(`User "${username}" created`, 'success');
+            // Clear form
+            document.getElementById('adminNewUsername').value = '';
+            document.getElementById('adminNewPassword').value = '';
+            document.getElementById('adminNewRole').value = 'operator';
+            document.getElementById('adminNewDevices').value = '';
+            await this.adminLoadUsers();
+        } catch (e) {
+            this.showToast(`Create error: ${e.message}`, 'error');
+        }
+    }
+
+    async adminDeleteUser(userId, username) {
+        if (!confirm(`Delete user "${username}" (ID ${userId})? This cannot be undone.`)) return;
+
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+
+        try {
+            const resp = await fetch(`${baseUrl}/api/users/${userId}`, {
+                method: 'DELETE',
+                credentials: 'include',
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) {
+                this.showToast(data.error || 'Delete failed', 'error');
+                return;
+            }
+            this.showToast(`User "${username}" deleted`, 'success');
+            await this.adminLoadUsers();
+        } catch (e) {
+            this.showToast(`Delete error: ${e.message}`, 'error');
+        }
+    }
+
+    openPermModal(userId) {
+        const user = (this._adminUsers || []).find(u => u.id === userId);
+        if (!user) return;
+
+        this._adminEditUserId = userId;
+        document.getElementById('adminPermUser').textContent = user.username;
+
+        const currentPerms = new Set((user.permissions || []).map(p => p.toLowerCase()));
+        const devices = this._adminKnownDevices || ['generator', 'fan', 'houseload', 'solartracker'];
+
+        // Build checkboxes
+        const container = document.getElementById('adminPermCheckboxes');
+        container.innerHTML = devices.map(d => {
+            const checked = currentPerms.has(d) ? 'checked' : '';
+            return `<label class="admin-perm-cb"><input type="checkbox" value="${this._esc(d)}" ${checked} /><span>${this._esc(d)}</span></label>`;
+        }).join('');
+
+        // Fill custom input with current permissions
+        document.getElementById('adminPermCustom').value = (user.permissions || []).join(', ');
+
+        document.getElementById('adminPermModal').style.display = '';
+    }
+
+    closePermModal(e) {
+        if (e && e.target !== e.currentTarget) return;
+        document.getElementById('adminPermModal').style.display = 'none';
+        this._adminEditUserId = null;
+    }
+
+    async savePermissions() {
+        const userId = this._adminEditUserId;
+        if (!userId) return;
+
+        // Collect from checkboxes
+        const checked = [...document.querySelectorAll('#adminPermCheckboxes input:checked')].map(cb => cb.value);
+        // Also parse custom input for any extras
+        const customRaw = (document.getElementById('adminPermCustom')?.value || '').trim();
+        const customDevices = customRaw ? customRaw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean) : [];
+
+        // Merge (unique)
+        const devices = [...new Set([...checked, ...customDevices])].sort();
+
+        let baseUrl = this.piGatewayBaseUrl || '';
+        if (baseUrl === '/' || baseUrl === '') baseUrl = '';
+
+        try {
+            const resp = await fetch(`${baseUrl}/api/users/${userId}/permissions`, {
+                method: 'PUT',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ devices }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) {
+                this.showToast(data.error || 'Save failed', 'error');
+                return;
+            }
+            this.showToast('Permissions saved', 'success');
+            this.closePermModal();
+            await this.adminLoadUsers();
+        } catch (e) {
+            this.showToast(`Save error: ${e.message}`, 'error');
+        }
+    }
     
     init() {
         document.getElementById('scanBtn').addEventListener('click', () => this.scanDevices());
+
+        // Auth UI
+        this.initAuthUI();
+        this.updateAuthUI();
+
+        // Admin UI
+        this.initAdminUI();
 
         // Navigation bar page switching
         this.initNavbar();
@@ -1920,13 +2918,13 @@ class USBDeviceManager {
         }
         this.updatePiGatewayUI();
         
-    // Check Web Serial API support (skip if Pi Gateway is enabled)
+    // Check Web Serial API support (skip when Pi Gateway is enabled)
         if (!navigator.serial && !this.piGatewayEnabled) {
             this.showNotSupported();
             return;
         }
         
-    // Listen for serial connect/disconnect events (only if Web Serial available)
+    // Listen for serial connect/disconnect events (only if WebSerial exists)
         if (navigator.serial) {
             navigator.serial.addEventListener('connect', (e) => this.onPortConnect(e));
             navigator.serial.addEventListener('disconnect', (e) => this.onPortDisconnect(e));
@@ -1934,15 +2932,13 @@ class USBDeviceManager {
         
         this.updateUI();
 
-        // If Pi Gateway is enabled, auto-load devices from Pi
-        if (this.piGatewayEnabled) {
-            this.piGetDevices();
-        }
-
         // Flow builder might exist in the page; initialize UI if present
         this.renderFlow();
     this.renderRunSummary();
         this.renderRunHistory();
+
+        // Pre-planned power requests panel (if present)
+        this.initPlannedRequestUI();
 
         // Command library (drag commands into flow)
         const search = document.getElementById('librarySearch');
@@ -3156,24 +4152,68 @@ class USBDeviceManager {
     }
     
     showNotSupported() {
-        // If Pi Gateway is enabled, don't show "not supported" - use Pi API instead
-        if (this.piGatewayEnabled) {
-            return;
-        }
         const msg = `
             <div class="empty-state">
                 <p>⚠️ Your browser doesn't support the Web Serial API</p>
-                <p>Please use Chrome or Edge</p>
+                <p>Please use Chrome or Edge, or enable <strong>Pi Gateway</strong> mode</p>
             </div>
         `;
         document.getElementById('availableDevices').innerHTML = msg;
     }
     
     async scanDevices() {
-        // If Pi Gateway is enabled, use HTTP API instead of Web Serial
+        // ── Pi Gateway mode: scan via HTTP instead of WebSerial ──
         if (this.piGatewayEnabled) {
-            return this.piScanDevices();
+            try {
+                if (!navigator.serial) {
+                    // Clear the "not supported" message when Pi Gateway is on
+                    const avail = document.getElementById('availableDevices');
+                    if (avail && avail.querySelector('.empty-state')) avail.innerHTML = '';
+                }
+
+                this.showToast('Scanning devices via Pi Gateway...', 'warning');
+                const scanResult = await this.piScanDevices();          // HTTP /api/scan
+                const deviceInfo = await this.piGetDeviceInfo();         // HTTP /api/devices → deviceInfo
+
+                if (!scanResult || Object.keys(scanResult).length === 0) {
+                    this.showToast('No devices found on Pi', 'error');
+                    return;
+                }
+
+                // Clear old Pi devices from the map
+                for (const [id, d] of this.availableDevices) {
+                    if (d.isPiDevice) this.availableDevices.delete(id);
+                }
+
+                for (const [name, port] of Object.entries(scanResult)) {
+                    const id = `pi_${name}`;
+                    const cmds = (deviceInfo && deviceInfo[name] && deviceInfo[name].commands) || [];
+                    const parsed = this.parseFirmwareCommands(cmds);
+
+                    this.availableDevices.set(id, {
+                        id,
+                        name,
+                        type: this.guessDeviceRole(name),
+                        commands: parsed.commands,
+                        commandSignatures: parsed.signaturesByCommand,
+                        isPiDevice: true,
+                        piDeviceType: name,
+                        isConnected: false,
+                    });
+                }
+
+                this.lastScanAt = new Date();
+                this.updateUI();
+                this.showToast(`Found ${Object.keys(scanResult).length} device(s) via Pi Gateway`, 'success');
+                return;
+            } catch (err) {
+                console.error('[Pi Gateway] scan error', err);
+                this.showToast('Pi Gateway scan error: ' + (err.message || err), 'error');
+                return;
+            }
         }
+
+        // ── WebSerial mode (original) ──
         try {
             this.showToast('Scanning devices...', 'warning');
             console.log('[scanDevices] start: requesting serial port picker...');
@@ -3375,7 +4415,16 @@ class USBDeviceManager {
         if (!body || !empty) return;
 
         const query = (document.getElementById('librarySearch')?.value || '').trim().toLowerCase();
-        const devices = Array.from(this.connectedDevices.values());
+
+        // Merge connected devices + Pi Gateway available devices (avoid duplicates)
+        const deviceMap = new Map();
+        for (const [id, d] of this.connectedDevices) deviceMap.set(id, d);
+        if (this.piGatewayEnabled) {
+            for (const [id, d] of this.availableDevices) {
+                if (!deviceMap.has(id)) deviceMap.set(id, d);
+            }
+        }
+        const devices = Array.from(deviceMap.values());
 
         if (devices.length === 0) {
             body.innerHTML = '';
@@ -3423,6 +4472,10 @@ class USBDeviceManager {
                     chip.setAttribute('aria-label', `${cmd}: ${help}`);
                 }
                 chip.draggable = true;
+                chip.style.cursor = 'pointer';
+                chip.addEventListener('click', () => {
+                    this.executeCommand(d.id, cmd);
+                });
                 chip.addEventListener('dragstart', (e) => {
                     e.dataTransfer.effectAllowed = 'copy';
                     e.dataTransfer.setData('application/json', JSON.stringify({ deviceId: d.id, cmd }));
@@ -3470,21 +4523,16 @@ class USBDeviceManager {
     }
 
     getCommandsForDeviceId(deviceId) {
-        const d = this.connectedDevices.get(deviceId);
+        const d = this.connectedDevices.get(deviceId) || this.availableDevices.get(deviceId);
         if (!d) return [];
-        // If this device is a WebSerial revidyneDevice, prefer its listCmds()
-        if (d.revidyneDevice) {
-            const cmds = d.revidyneDevice.listCmds ? d.revidyneDevice.listCmds() : (d.commands || []);
-            return (cmds || []).filter(c => c && c !== 'eoc');
+        // Pi devices store commands directly; WebSerial devices use revidyneDevice.listCmds()
+        let cmds;
+        if (d.revidyneDevice && d.revidyneDevice.listCmds) {
+            cmds = d.revidyneDevice.listCmds();
+        } else {
+            cmds = d.commands || [];
         }
-
-        // If this is a Pi-backed device, commands are stored in d.commands
-        if (Array.isArray(d.commands) && d.commands.length > 0) {
-            return d.commands.filter(c => c && String(c).toLowerCase() !== 'eoc');
-        }
-
-        // Fallback: empty list
-        return [];
+        return (cmds || []).filter(c => c && c !== 'eoc');
     }
 
     addFlowStep() {
@@ -4458,12 +5506,15 @@ class USBDeviceManager {
 
     
     async executeCommand(deviceId, cmdName, options = {}) {
-        const device = this.connectedDevices.get(deviceId);
+        // Find device in connected OR available (Pi Gateway devices live in available)
+        let device = this.connectedDevices.get(deviceId);
+        if (!device) device = this.availableDevices.get(deviceId);
         if (!device) return;
-        
-        // Check if this is a Pi device (no revidyneDevice, but has isPiDevice flag)
-        const isPiDevice = device.isPiDevice === true;
-        if (!isPiDevice && !device.revidyneDevice) return;
+
+        const isPiDevice = !device.revidyneDevice && this.piGatewayEnabled;
+
+        // If it's neither a WebSerial device nor a Pi device, bail out
+        if (!device.revidyneDevice && !isPiDevice) return;
 
         // Demo/Safe Mode guard: block set* commands (manual/scenario/flow)
         const isSetCmd = String(cmdName || '').toLowerCase().startsWith('set');
@@ -4487,7 +5538,7 @@ class USBDeviceManager {
             return;
         }
 
-        const dev = device.revidyneDevice;
+        const dev = device.revidyneDevice; // null for Pi devices
 
         // Ensure commands for the same device are serialized
     return this.enqueueDeviceCommand(deviceId, async () => {
@@ -4530,21 +5581,13 @@ class USBDeviceManager {
 
             try {
                 let result;
-                
-                // ========== Pi Device: use HTTP API ==========
+
                 if (isPiDevice) {
-                    const piDeviceType = device.piDeviceType || 'device1';
-                    // piSendCommand(cmd, args, deviceName) returns response array or null
-                    const apiResult = await this.piSendCommand(cmdName, args, piDeviceType);
-                    if (apiResult) {
-                        result = apiResult;
-                    } else {
-                        throw new Error('Pi command failed');
-                    }
-                }
-                // ========== WebSerial Device ==========
-                else if (args.length > 0) {
-                    // For inArg commands, send cmd then args lines.
+                    // ---- Pi Gateway path: send via HTTP ----
+                    const fullCmd = args.length > 0 ? [cmdName, ...args].join(' ') : cmdName;
+                    result = await this.piSendCommand(fullCmd, [], device.name);
+                } else if (args.length > 0) {
+                    // ---- WebSerial path with args ----
                     await this.withTimeout(dev.sendCommand(cmdName), timeoutMs, `${cmdName} send`);
                     for (const a of args) {
                         await this.withTimeout(dev.sendCommand(String(a)), timeoutMs, `${cmdName} arg send`);
@@ -4565,6 +5608,7 @@ class USBDeviceManager {
                         result = null;
                     }
                 } else {
+                    // ---- WebSerial path without args ----
                     result = await this.withTimeout(dev.call(cmdName, true), timeoutMs, `${cmdName} call`);
                 }
 
@@ -4624,20 +5668,7 @@ class USBDeviceManager {
     
     async disconnectDevice(deviceId) {
         const device = this.connectedDevices.get(deviceId) || this.availableDevices.get(deviceId);
-        if (!device) return;
-        
-        // Pi devices: just remove from connected, add back to available
-        if (device.isPiDevice) {
-            this.connectedDevices.delete(deviceId);
-            device.isConnected = false;
-            this.availableDevices.set(deviceId, device);
-            this.showToast(`Disconnected: ${device.name}`);
-            this.updateUI();
-            return;
-        }
-        
-        // WebSerial devices: actually disconnect
-        if (!device.revidyneDevice) return;
+        if (!device || !device.revidyneDevice) return;
         
         try {
             await device.revidyneDevice.disconnect();
