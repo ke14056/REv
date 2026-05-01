@@ -45,7 +45,7 @@ READ_TIMEOUT = 0.5
 # Auth / DB
 DB_PATH = os.environ.get('REVIDYNE_DB_PATH', os.path.join(os.path.dirname(__file__), 'revidyne.db'))
 BOOTSTRAP_ADMIN_USER = os.environ.get('REVIDYNE_ADMIN_USER', 'admin')
-BOOTSTRAP_ADMIN_PASS = os.environ.get('REVIDYNE_ADMIN_PASS', '')
+BOOTSTRAP_ADMIN_PASS = os.environ.get('REVIDYNE_ADMIN_PASS', 'admin_password')
 
 # Device mapping: name -> port path
 # Will be auto-detected or manually configured
@@ -180,28 +180,21 @@ def check_device_permission(user, device_name: str):
 
 
 def ensure_admin_exists():
-    # If there's already any admin, do nothing.
     conn = db_connect()
     try:
         admin = conn.execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1").fetchone()
         if admin:
+            conn.execute(
+                "UPDATE users SET username = ?, password_hash = ? WHERE id = ?",
+                (BOOTSTRAP_ADMIN_USER, generate_password_hash(BOOTSTRAP_ADMIN_PASS), admin['id'])
+            )
+            conn.commit()
             return
+
+        create_user(BOOTSTRAP_ADMIN_USER, BOOTSTRAP_ADMIN_PASS, role='admin')
+        conn.commit()
     finally:
         conn.close()
-
-    # Bootstrap admin
-    if not BOOTSTRAP_ADMIN_PASS:
-        import secrets
-        boot_pass = secrets.token_urlsafe(12)
-        print("\n" + "!" * 60)
-        print("No admin found. Bootstrapping admin user:")
-        print(f"  username: {BOOTSTRAP_ADMIN_USER}")
-        print(f"  password: {boot_pass}")
-        print("Set REVIDYNE_ADMIN_PASS env var to control this.")
-        print("!" * 60 + "\n")
-        create_user(BOOTSTRAP_ADMIN_USER, boot_pass, role='admin')
-    else:
-        create_user(BOOTSTRAP_ADMIN_USER, BOOTSTRAP_ADMIN_PASS, role='admin')
 
 
 def bootstrap_department_accounts():
