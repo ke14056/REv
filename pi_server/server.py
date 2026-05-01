@@ -35,7 +35,22 @@ app.config.update(
 
 # CORS isn't strictly needed when serving the web app from the same origin,
 # but we keep it for compatibility with Pi Gateway remote usage.
-CORS(app, supports_credentials=True)
+CORS(app, supports_credentials=True, origins=[
+    'https://ke14056.github.io',
+    'https://pennant-startle-earlobe.ngrok-free.dev',
+])
+
+
+@app.after_request
+def add_cors_headers(response):
+    # Ensure credentials header is present for browser requests from allowed origins
+    # Flask-CORS already handles most cases; this ensures OPTIONS preflight and
+    # simple requests include the credentials allowance when Origin is allowed.
+    origin = request.headers.get('Origin')
+    if origin in ('https://ke14056.github.io', 'https://pennant-startle-earlobe.ngrok-free.dev'):
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers['Access-Control-Allow-Origin'] = origin
+    return response
 
 # ============ Configuration ============
 BAUD_RATE = 115200
