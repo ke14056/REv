@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Revidyne Device Manager</title>
+    <link rel="stylesheet" href="styles.css?v=20260401a">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⚡ Revidyne Energy Device Manager</h1>
+            <div class="header-actions">
+                <label class="safe-mode" title="When ON, set* commands are blocked">
+                    <input id="safeModeToggle" type="checkbox" />
+                    <span class="safe-mode-label">Demo/Safe</span>
+                </label>
+                <div class="pi-gateway-control" title="Route commands through Raspberry Pi instead of direct WebSerial">
+                    <label class="pi-gateway-toggle">
+                        <input id="piGatewayToggle" type="checkbox" />
+                        <span class="pi-gateway-label">🌐 Pi Gateway</span>
+                    </label>
+                    <input id="piGatewayUrl" type="text" class="pi-gateway-url" placeholder="http://10.106.249.120:5000" />
+                </div>
+                    <div class="header-right">
+                        <div class="auth-widget" id="authWidget">
+                            <div class="auth-status">
+                                User: <span id="authStatus">Not logged in</span>
+                            </div>
+                            <div id="loginFormWrap">
+                                <form id="loginForm" class="login-form">
+                                    <input id="loginUsername" type="text" placeholder="username" autocomplete="username" required />
+                                    <input id="loginPassword" type="password" placeholder="password" autocomplete="current-password" required />
+                                    <button type="submit">Login</button>
+                                </form>
+                            </div>
+                            <div id="userInfoWrap" style="display:none;">
+                                <button id="logoutBtn" type="button">Logout</button>
+                            </div>
+                        </div>
+                    </div>
+                <button id="demoCycleBtn" class="scan-btn" style="background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);">🔄 Demo Cycle</button>
+                <button id="demoTourBtn" class="scan-btn secondary" title="Step-by-step guided demo">🎬 Demo Tour</button>
+                <button id="showTutorialBtn" class="scan-btn secondary" title="Show tutorial">🎓 Tutorial</button>
+                <button id="scanBtn" class="scan-btn">🔍 Scan Devices</button>
+            </div>
+        </header>
+
+        <nav class="navbar">
+            <button class="nav-btn active" data-page="devices">📱 Devices</button>
+            <button class="nav-btn" data-page="metrics">📊 Metrics</button>
+            <button class="nav-btn" data-page="control">🎮 Control</button>
+            <button class="nav-btn" data-page="connections">🔗 Connections</button>
+            <button class="nav-btn" data-page="logs">📋 Logs</button>
+            <button class="nav-btn" data-page="admin" id="navAdminBtn" style="display:none;">🔑 Admin</button>
+        </nav>
+
+        <div class="nav-page active" id="page-devices">
+            <main class="panels">
+                <div class="panel left-panel">
+                    <h2>📋 Available Devices</h2>
+                    <p class="panel-desc">Discovered Revidyne devices</p>
+                    <div id="availableDevices" class="device-list" ondrop="drop(event, 'available')" ondragover="allowDrop(event)"></div>
+                </div>
+                <div class="panel right-panel">
+                    <h2>✅ Connected Devices</h2>
+                    <p class="panel-desc">Drag a device here to control it</p>
+                    <div id="connectedDevices" class="device-list" ondrop="drop(event, 'connected')" ondragover="allowDrop(event)"></div>
+                </div>
+            </main>
+            <section class="onboarding">
+                <div class="onboarding-header">
+                    <h2>🎓 Quick Start</h2>
+                    <button id="dismissOnboardingBtn" class="onboarding-btn secondary">Hide</button>
+                </div>
+                <div class="onboarding-grid">
+                    <div class="onboarding-card"><h3>1) Chrome/Edge</h3><p>Web Serial required.</p></div>
+                    <div class="onboarding-card"><h3>2) Scan</h3><p>Click 🔍 Scan.</p></div>
+                    <div class="onboarding-card"><h3>3) Drag</h3><p>Drag to Connected.</p></div>
+                    <div class="onboarding-card"><h3>4) Commands</h3><p>Click to control.</p></div>
+                </div>
+            </section>
+        </div>
+
+        <div class="nav-page" id="page-metrics">
+            <section class="summary">
+                <div class="summary-item"><span class="summary-label">Connected</span><span id="summaryConnected" class="summary-value">0</span></div>
+                <div class="summary-item"><span class="summary-label">Available</span><span id="summaryAvailable" class="summary-value">0</span></div>
+                <div class="summary-item"><span class="summary-label">Providers</span><span id="summaryProviders" class="summary-value">0</span></div>
+                <div class="summary-item"><span class="summary-label">Consumers</span><span id="summaryConsumers" class="summary-value">0</span></div>
+                <div class="summary-item summary-wide"><span class="summary-label">Last scan</span><span id="summaryLastScan" class="summary-value">—</span></div>
+            </section>
+
+            <section class="metrics" aria-label="Live metrics">
+                <div class="metrics-header">
+                    <h3>Live Metrics</h3>
+                    <div class="metrics-meta">Updated: <span id="metricsUpdatedAt">—</span></div>
+                    <button id="metricsPauseBtn" class="metrics-pause-btn" title="Pause/Resume auto-refresh">⏸️ Pause</button>
+                    <button id="metricsRefreshBtn" class="metrics-refresh-btn" title="Refresh now">🔄 Refresh</button>
+                    <button id="metricsResetFilterBtn" class="metrics-reset-btn" title="Reset filter history">🗑️ Reset</button>
+                    <button id="metricsRawBtn" class="metrics-raw-btn" title="Show raw values in console">📊 Raw</button>
+                    <div id="metricsDetailsState" class="metrics-details-state"></div>
+                    <label class="metrics-details-toggle" title="Show/hide extra helper text">
+                        <input id="metricsShowDetailsToggle" type="checkbox" />
+                        <span>Show details</span>
+                    </label>
+                </div>
+                <div class="metrics-quick-actions">
+                    <div class="metrics-quick-left">
+                        <div class="metrics-quick-title">Estimates</div>
+                        <div id="demandSourceHint" class="metrics-quick-sub">Demand source: —</div>
+                        <label class="metrics-manual-pref" title="When enabled, supply/demand will prefer your manual Capacity/Rated estimates over telemetry (useful for demos).">
+                            <input id="preferManualEstimatesToggle" type="checkbox" />
+                            <span>Prefer manual estimates</span>
+                        </label>
+                    </div>
+                    <button id="jumpToEstimatesBtn" class="metrics-alloc-btn secondary" type="button">Jump to device estimates</button>
+                </div>
+
+                <div id="metricsBalance" class="metrics-balance">
+                    <div class="metrics-balance-item"><span class="metrics-balance-label">Estimated supply</span><span id="metricsSupply" class="metrics-balance-value">—</span></div>
+                    <div class="metrics-balance-item"><span class="metrics-balance-label">Estimated demand</span><span id="metricsDemand" class="metrics-balance-value">—</span></div>
+                    <div class="metrics-balance-item metrics-balance-wide"><span class="metrics-balance-label">Balance</span><span id="metricsBalanceText" class="metrics-balance-value">—</span></div>
+                    <div id="metricsBalanceHint" class="metrics-balance-hint"></div>
+
+                    <div class="metrics-alloc">
+                        <div class="metrics-alloc-left">
+                            <div class="metrics-alloc-title">Apply allocation (Generator)</div>
+                            <div class="metrics-alloc-sub">Sends <code>setLoad</code> to the generator. Respects Demo/Safe mode.</div>
+                        </div>
+                        <label class="metrics-alloc-field">
+                            <span>Target load (kW)</span>
+                            <input id="allocTargetKW" type="number" min="0" step="0.1" placeholder="e.g., 2.0" />
+                        </label>
+                        <button id="allocApplyBtn" class="metrics-alloc-btn" type="button">Apply to Generator</button>
+
+                        <div class="metrics-alloc-divider"></div>
+
+                        <div class="metrics-alloc-auto">
+                            <div class="metrics-alloc-auto-left">
+                                <div class="metrics-alloc-auto-title">Option A: apply from Estimated demand</div>
+                                <div class="metrics-alloc-auto-sub">One click sets generator load to the current Estimated demand.</div>
+                            </div>
+                            <label class="metrics-alloc-field">
+                                <span>Max cap (kW)</span>
+                                <input id="allocMaxKW" type="number" min="0" step="0.1" placeholder="optional" />
+                            </label>
+                            <button id="allocApplyFromDemandBtn" class="metrics-alloc-btn secondary" type="button">Set = Estimated demand</button>
+                        </div>
+
+                        <div class="metrics-alloc-divider"></div>
+
+                        <div class="metrics-alloc-auto">
+                            <div class="metrics-alloc-auto-left">
+                                <div class="metrics-alloc-auto-title">Auto-estimate demand</div>
+                                <div class="metrics-alloc-auto-sub">If ON, Estimated demand follows provider output.</div>
+                            </div>
+                            <button id="autoEstDemandToggleBtn" class="metrics-alloc-btn secondary" type="button">Enable auto-estimate</button>
+                            <div id="autoEstDemandStatus" class="metrics-balance-hint"></div>
+                        </div>
+
+                        <div class="metrics-alloc-auto">
+                            <div class="metrics-alloc-auto-left">
+                                <div class="metrics-alloc-auto-title">Auto-estimate tuning</div>
+                                <div class="metrics-alloc-auto-sub">Response speed and max step.</div>
+                            </div>
+                            <label class="metrics-alloc-field">
+                                <span>Response speed</span>
+                                <input id="autoEstAlpha" type="range" min="0.05" max="0.95" step="0.05" value="0.35" />
+                            </label>
+                            <label class="metrics-alloc-field">
+                                <span>Max step (kW)</span>
+                                <input id="autoEstMaxStep" type="number" min="0.1" step="0.1" value="1.0" />
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="metricsEmpty" class="empty-state">Connect a device to see voltage/power readings.</div>
+                <div class="metrics-table-wrap">
+                    <table class="metrics-table">
+                        <thead><tr><th>Device</th><th>Type</th><th>Voltage</th><th>Power (kW)</th></tr></thead>
+                        <tbody id="metricsTableBody"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="planned-request" aria-label="Pre-planned power request">
+                <div class="planned-request-header">
+                    <h3>🧠 Pre-planned Power Request</h3>
+                    <div class="planned-request-meta">Ask for a target (W). The system checks current solar/wind vs generator capacity, and ramps load to reduce shutdown risk.</div>
+                </div>
+                <div class="planned-request-body">
+                    <div class="planned-request-grid">
+                        <label class="planned-field">
+                            <span>Target demand (W)</span>
+                            <input id="plannedTargetW" type="number" min="0" step="10" placeholder="e.g., 800" />
+                        </label>
+
+                        <div class="planned-actions">
+                            <button id="plannedPlanBtn" class="flow-btn secondary" type="button">Plan</button>
+                            <button id="plannedExecuteBtn" class="flow-btn" type="button">Execute (ramp)</button>
+                            <button id="plannedCancelBtn" class="flow-btn danger" type="button">Cancel</button>
+                        </div>
+
+                        <label class="planned-field">
+                            <span>Generator cap (kW)</span>
+                            <input id="plannedMaxGenKW" type="number" min="0" step="0.1" placeholder="e.g., 3.0" />
+                        </label>
+
+                        <label class="planned-field">
+                            <span>Ramp step (kW)</span>
+                            <input id="plannedRampStepKW" type="number" min="0.05" step="0.05" placeholder="e.g., 0.2" />
+                        </label>
+
+                        <label class="planned-field">
+                            <span>Ramp interval (ms)</span>
+                            <input id="plannedRampIntervalMs" type="number" min="200" step="100" placeholder="e.g., 1500" />
+                        </label>
+
+                        <label class="planned-toggle" title="If non-generator supply is 0, allow retrying for a while.">
+                            <input id="plannedAllowWait" type="checkbox" />
+                            <span>Allow waiting / retry</span>
+                        </label>
+                    </div>
+
+                    <div id="plannedScheduleViz" class="planned-schedule" aria-label="Ramp schedule preview"></div>
+
+                    <div id="plannedRequestStatus" class="planned-request-status"></div>
+                </div>
+            </section>
+        </div>
+
+        <div class="nav-page" id="page-control">
+            <section class="library">
+                <div class="library-header"><h3>Command Library</h3></div>
+                <div class="library-controls"><input id="librarySearch" class="library-search" type="text" placeholder="Search..." /><button class="library-btn" onclick="manager.refreshCommandLibrary()">Refresh</button></div>
+                <div id="libraryBody" class="library-body"></div>
+                <div id="libraryEmpty" class="empty-state">Connect devices to see commands.</div>
+            </section>
+        </div>
+
+        <div class="nav-page" id="page-connections">
+            <section class="connections">
+                <div class="connections-header"><h3>Connections</h3><div class="connections-meta">Link Providers to Consumers</div>
+                    <div class="connections-actions"><button id="connApplyMode2Btn" class="flow-btn">Apply</button><button id="connClearBtn" class="flow-btn danger">Clear</button></div>
+                </div>
+                <div class="connections-hint">Click Provider then Consumer.</div>
+                <div id="connCanvas" class="conn-canvas">
+                    <svg id="connSvg" class="conn-svg"></svg>
+                    <div class="conn-col"><div class="conn-col-title">Providers</div><div id="connProviders" class="conn-list"></div></div>
+                    <div class="conn-col"><div class="conn-col-title">Consumers</div><div id="connConsumers" class="conn-list"></div></div>
+                </div>
+                <div id="connStatus" class="connections-status">No connections.</div>
+            </section>
+
+            <section class="demand-request">
+                <div class="demand-request-header">
+                    <h3>🏠 Demand Request Mode</h3>
+                    <div class="demand-request-meta">Set consumer needs, auto-request from providers</div>
+                </div>
+                <div class="demand-request-body">
+                    <div class="demand-request-hint">
+                        <p>💡 Add multiple consumers and their power needs below, then click <strong>Apply All Requests</strong>.</p>
+                        <p>The system will automatically update connections and request the generator to fill any deficit.</p>
+                    </div>
+                    
+                    <div class="demand-request-list-header">
+                        <span>Consumer Requests</span>
+                        <button id="demandAddBtn" class="flow-btn secondary">+ Add Request</button>
+                    </div>
+                    <div id="demandRequestList" class="demand-request-list">
+                        <!-- Dynamic rows will be added here -->
+                    </div>
+                    
+                    <div class="demand-request-actions">
+                        <button id="demandApplyAllBtn" class="flow-btn">⚡ Apply All Requests</button>
+                        <button id="demandClearAllBtn" class="flow-btn danger">Clear All</button>
+                        <span id="demandTotalKW" class="demand-total">Total: 0.00 kW</span>
+                    </div>
+                    <div id="demandRequestStatus" class="demand-request-status"></div>
+                </div>
+            </section>
+
+            <section class="surplus-handler">
+                <div class="surplus-header">
+                    <h3>⚡ Surplus Energy Handler</h3>
+                    <div class="surplus-meta">Route excess power to CVT or storage</div>
+                </div>
+                <div class="surplus-body">
+                    <div class="surplus-hint">
+                        <p>💡 When supply exceeds demand, the surplus energy can be sent to a <strong>CVT</strong> to be consumed or stored.</p>
+                    </div>
+                    
+                    <div class="surplus-status-row">
+                        <div class="surplus-item">
+                            <span class="surplus-label">Estimated Supply</span>
+                            <span id="surplusSupply" class="surplus-value">0.00 kW</span>
+                        </div>
+                        <div class="surplus-item">
+                            <span class="surplus-label">Estimated Demand</span>
+                            <span id="surplusDemand" class="surplus-value">0.00 kW</span>
+                        </div>
+                        <div class="surplus-item surplus-highlight">
+                            <span class="surplus-label">Surplus</span>
+                            <span id="surplusValue" class="surplus-value">0.00 kW</span>
+                        </div>
+                    </div>
+
+                    <div class="surplus-target">
+                        <label class="surplus-field">
+                            <span>Send surplus to</span>
+                            <select id="surplusTargetSelect">
+                                <option value="">-- Select CVT/Storage --</option>
+                            </select>
+                        </label>
+                        <button id="surplusApplyBtn" class="flow-btn">🔄 Route Surplus to CVT</button>
+                    </div>
+                    <div id="surplusStatus" class="surplus-status"></div>
+                </div>
+            </section>
+        </div>
+
+        <div class="nav-page" id="page-logs">
+            <section class="controller">
+                <div class="controller-header"><h3>Controller</h3><div class="controller-hint">Run scenarios</div></div>
+                <div class="controller-actions">
+                    <button class="controller-btn" onclick="manager.runScenario('startup')">▶ Startup</button>
+                    <button class="controller-btn" onclick="manager.runScenario('eco')">🌿 Eco</button>
+                    <button class="controller-btn" onclick="manager.runScenario('demand')">⚡ Demand</button>
+                </div>
+                <div class="controller-note" id="controllerStatus">Connect devices first.</div>
+            </section>
+
+            <section class="templates">
+                <div class="templates-header"><h3>Templates</h3></div>
+                <div class="templates-actions">
+                    <button class="templates-btn" onclick="applyTemplate('gen_load_cycle')">⚡ Generator + Load</button>
+                    <button class="templates-btn" onclick="applyTemplate('solar_tracker_routine')">🧭 Solar Tracker</button>
+                    <button class="templates-btn" onclick="applyTemplate('wind_turbine_demo')">🌬️ Wind Turbine</button>
+                </div>
+            </section>
+
+            <section class="cmdlog">
+                <div class="cmdlog-header"><h3>Command Log</h3>
+                    <div class="cmdlog-actions"><button class="cmdlog-btn" onclick="manager.exportCommandLog('json')">JSON</button><button class="cmdlog-btn" onclick="manager.exportCommandLog('csv')">CSV</button><button class="cmdlog-btn danger" onclick="manager.clearCommandLog()">Clear</button></div>
+                </div>
+                <div class="cmdlog-table-wrap"><table class="cmdlog-table"><thead><tr><th>Time</th><th>Device</th><th>Command</th><th>Args</th><th>Result</th></tr></thead><tbody id="cmdLogBody"></tbody></table></div>
+                <div id="cmdLogEmpty" class="empty-state">No commands yet.</div>
+            </section>
+            <section class="flow">
+                <div class="flow-header"><h3>Flow Builder</h3>
+                    <div class="flow-actions"><button class="flow-btn" onclick="manager.addFlowStep()">+ Add</button><button class="flow-btn" onclick="manager.runFlow()">▶ Run</button><button id="flowStopBtn" class="flow-btn danger" onclick="manager.stopFlow()" disabled>■ Stop</button><button class="flow-btn" onclick="manager.clearFlow()">Clear</button></div>
+                </div>
+                <ol id="flowList" class="flow-list"></ol>
+                <div id="flowEmpty" class="empty-state">No steps.</div>
+                <div id="flowStatus" class="flow-status">Ready.</div>
+                <section class="run-summary"><div class="run-summary-header"><h4>Last Run</h4></div><div id="runSummaryBody" class="run-summary-body"><div class="empty-state">No runs.</div></div></section>
+                <section class="run-history"><div class="run-summary-header"><h4>History (<span id="runHistoryN">10</span>)</h4></div><div id="runHistoryBody" class="run-summary-body"><div class="empty-state">No history.</div></div></section>
+            </section>
+        </div>
+
+        <!-- ===== Admin Panel (visible only to admin role) ===== -->
+        <div class="nav-page" id="page-admin">
+            <section class="admin-panel">
+                <div class="admin-header">
+                    <h3>🔑 User &amp; Permission Management</h3>
+                    <p class="admin-subtitle">Manage department accounts, roles, and device access</p>
+                </div>
+
+                <!-- Create User Form -->
+                <div class="admin-create-section">
+                    <h4>➕ Create New User</h4>
+                    <form id="adminCreateForm" class="admin-create-form">
+                        <label>
+                            <span>Username</span>
+                            <input id="adminNewUsername" type="text" placeholder="e.g. new_dept" required />
+                        </label>
+                        <label>
+                            <span>Password</span>
+                            <input id="adminNewPassword" type="password" placeholder="password" required />
+                        </label>
+                        <label>
+                            <span>Role</span>
+                            <select id="adminNewRole">
+                                <option value="operator">operator</option>
+                                <option value="viewer">viewer</option>
+                                <option value="admin">admin</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>Devices (comma-separated)</span>
+                            <input id="adminNewDevices" type="text" placeholder="e.g. generator,fan" />
+                        </label>
+                        <button type="submit" class="admin-btn primary">Create User</button>
+                    </form>
+                </div>
+
+                <!-- Users Table -->
+                <div class="admin-users-section">
+                    <div class="admin-users-header">
+                        <h4>👥 All Users</h4>
+                        <button id="adminRefreshBtn" class="admin-btn secondary" type="button">🔄 Refresh</button>
+                    </div>
+                    <div class="admin-table-wrap">
+                        <table class="admin-table" id="adminUsersTable">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Username</th>
+                                    <th>Role</th>
+                                    <th>Permissions</th>
+                                    <th>Created</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="adminUsersBody">
+                                <tr><td colspan="6" class="empty-state">Loading…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- API Keys -->
+                <div class="admin-users-section admin-api-keys-section">
+                    <div class="admin-users-header">
+                        <h4>🗝️ API Keys</h4>
+                        <button id="adminKeysRefreshBtn" class="admin-btn secondary" type="button">🔄 Refresh</button>
+                    </div>
+
+                    <form id="adminCreateKeyForm" class="admin-create-form admin-key-create-form">
+                        <label>
+                            <span>Owner username</span>
+                            <input id="adminKeyUsername" type="text" placeholder="e.g. admin" required />
+                        </label>
+                        <label>
+                            <span>Key name</span>
+                            <input id="adminKeyName" type="text" placeholder="e.g. demo-key" />
+                        </label>
+                        <button type="submit" class="admin-btn primary">+ Create API Key</button>
+                    </form>
+
+                    <div id="adminApiKeyResult" class="admin-key-result" style="display:none;"></div>
+
+                    <div class="admin-table-wrap">
+                        <table class="admin-table" id="adminKeysTable">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Name</th>
+                                    <th>Owner</th>
+                                    <th>Role</th>
+                                    <th>Status</th>
+                                    <th>Created</th>
+                                    <th>Last Used</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="adminKeysBody">
+                                <tr><td colspan="8" class="empty-state">Loading…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Edit Permissions Modal -->
+            <div id="adminPermModal" class="admin-modal-overlay" style="display:none;" onclick="manager.closePermModal(event)">
+                <div class="admin-modal" onclick="event.stopPropagation()">
+                    <div class="admin-modal-header">
+                        <h4>📝 Edit Permissions — <span id="adminPermUser">user</span></h4>
+                        <span class="close-btn" onclick="manager.closePermModal()">&times;</span>
+                    </div>
+                    <div class="admin-modal-body">
+                        <p>Select devices this user can control:</p>
+                        <div id="adminPermCheckboxes" class="admin-perm-checkboxes"></div>
+                        <label class="admin-perm-custom">
+                            <span>Or type devices (comma-separated):</span>
+                            <input id="adminPermCustom" type="text" placeholder="generator,fan,solartracker,houseload" />
+                        </label>
+                    </div>
+                    <div class="admin-modal-footer">
+                        <button class="admin-btn primary" onclick="manager.savePermissions()">💾 Save</button>
+                        <button class="admin-btn secondary" onclick="manager.closePermModal()">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <footer><div class="legend"><span class="legend-item"><span class="dot provider"></span> Provider</span><span class="legend-item"><span class="dot consumer"></span> Consumer</span></div></footer>
+    </div>
+
+    <div id="resultModal" class="modal" onclick="closeModal()"><div class="modal-content" onclick="event.stopPropagation()"><span class="close-btn" onclick="closeModal()">&times;</span><div id="resultContent"></div></div></div>
+
+    <script>
+        function applyTemplate(id) { window.manager?.applyTemplate?.(id); }
+        function exportRunSummary(f) { window.manager?.exportRunSummary?.(f); }
+        function clearRunSummary() { window.manager?.clearRunSummary?.(); }
+        function exportRunHistory(f) { window.manager?.exportRunHistory?.(f); }
+        function clearRunHistory() { window.manager?.clearRunHistory?.(); }
+    </script>
+    <script src="revidyne.js"></script>
+    <script src="app.js?v=20260401a"></script>
+</body>
+</html>
